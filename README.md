@@ -16,6 +16,8 @@ Um planner completo e inteligente para organizar seus horários e otimizar sua p
 - **🛜 Interface offline** - A interface pode abrir sem conexão; consultar e sincronizar dados exige internet
 - **🔔 Alarmes por atividade** - Escolha som, vibração e notificações para cada lembrete
 - **📝 Bloco de notas** - Crie páginas com texto, títulos, listas, checklists e citações
+- **🏋️ Academia** - Planeje treinos por dia da semana com exercícios, séries, repetições, carga e descanso
+- **✍️ Créditos** - Rodapé com autoria de Gleydes Oliveira
 
 ## 🛠️ Tecnologias
 
@@ -81,6 +83,10 @@ A instalação não exige download de uma loja de aplicativos. Entre com a mesma
 ### Bloco de notas
 
 Abra **Notas** no menu para criar páginas e escrever. Use a barra **Adicionar bloco** para inserir títulos, listas, tarefas com checklist, citações ou divisores. Pressione **Enter** ao terminar um bloco para criar outro do mesmo tipo. As notas são salvas automaticamente na conta e podem ser encontradas pela busca.
+
+### Treinos de academia
+
+Abra **Academia** no menu e crie um treino para cada dia da semana. Em cada treino, cadastre os exercícios, séries, repetições, carga e tempo de descanso. Os treinos são sincronizados na sua conta Google.
 
 ### Alarmes e lembretes
 

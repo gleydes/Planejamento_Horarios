@@ -24,6 +24,7 @@ import {
   ChevronRight,
   Clock3,
   Download,
+  Dumbbell,
   Edit2,
   FileText,
   Filter,
@@ -54,7 +55,7 @@ import { auth, db, firebaseConfigured } from "./firebase";
 
 type Category = "Trabalho" | "Pessoal" | "Saúde" | "Estudo" | "Lazer" | "Outro";
 type Priority = "Alta" | "Média" | "Baixa";
-type View = "Dashboard" | "Dia" | "Semana" | "Inteligente" | "Notas";
+type View = "Dashboard" | "Dia" | "Semana" | "Inteligente" | "Academia" | "Notas";
 type NoteBlockType = "paragraph" | "heading" | "bullet" | "checklist" | "quote" | "divider";
 
 interface NoteBlock {
@@ -92,6 +93,22 @@ interface PlannerTask {
   alarmVibration?: boolean;
 }
 
+interface GymExercise {
+  id: string;
+  name: string;
+  sets: number;
+  reps: string;
+  weight: string;
+  rest: string;
+}
+
+interface GymPlan {
+  id: string;
+  name: string;
+  day: number;
+  exercises: GymExercise[];
+}
+
 type NotificationPermissionState = NotificationPermission | "unsupported";
 
 const STORAGE_KEY = "meu-planner:activities:v1";
@@ -102,8 +119,10 @@ const views: { label: View; icon: typeof CalendarDays }[] = [
   { label: "Dia", icon: Calendar },
   { label: "Semana", icon: CalendarDays },
   { label: "Inteligente", icon: Sparkles },
+  { label: "Academia", icon: Dumbbell },
   { label: "Notas", icon: FileText },
 ];
+const dayLabels = ["Domingo", "Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado"];
 
 const categoryClass: Record<Category, string> = {
   Trabalho: "work",
@@ -215,12 +234,103 @@ function isPlannerTask(value: unknown): value is PlannerTask {
     && (task.alarmVibration === undefined || typeof task.alarmVibration === "boolean");
 }
 
+function isGymExercise(value: unknown): value is GymExercise {
+  if (typeof value !== "object" || value === null) return false;
+  const exercise = value as Record<string, unknown>;
+  return typeof exercise.id === "string"
+    && typeof exercise.name === "string"
+    && typeof exercise.sets === "number"
+    && Number.isInteger(exercise.sets)
+    && exercise.sets > 0
+    && typeof exercise.reps === "string"
+    && typeof exercise.weight === "string"
+    && typeof exercise.rest === "string";
+}
+
+function isGymPlan(value: unknown): value is GymPlan {
+  if (typeof value !== "object" || value === null) return false;
+  const plan = value as Record<string, unknown>;
+  return typeof plan.id === "string"
+    && typeof plan.name === "string"
+    && typeof plan.day === "number"
+    && Number.isInteger(plan.day)
+    && plan.day >= 0
+    && plan.day < 7
+    && Array.isArray(plan.exercises)
+    && plan.exercises.every(isGymExercise);
+}
+
 function formatDuration(minutes: number) {
   const hours = Math.floor(minutes / 60);
   const remainder = minutes % 60;
   if (hours === 0) return `${remainder} min`;
   if (remainder === 0) return `${hours}h`;
   return `${hours}h ${remainder}min`;
+}
+
+function createGymExercise(): GymExercise {
+  return { id: createId(), name: "", sets: 3, reps: "8-12", weight: "", rest: "60s" };
+}
+
+function GymPlanModal({ plan, onClose, onSave }: {
+  plan: GymPlan | null;
+  onClose: () => void;
+  onSave: (plan: GymPlan) => void;
+}) {
+  const [name, setName] = useState(plan?.name ?? "");
+  const [day, setDay] = useState(plan?.day ?? new Date().getDay());
+  const [exercises, setExercises] = useState<GymExercise[]>(plan?.exercises.length ? plan.exercises : [createGymExercise()]);
+  const [error, setError] = useState("");
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const cleanedExercises = exercises
+      .filter((exercise) => exercise.name.trim())
+      .map((exercise) => ({ ...exercise, name: exercise.name.trim() }));
+    if (!name.trim()) {
+      setError("Informe um nome para o treino.");
+      return;
+    }
+    if (!cleanedExercises.length) {
+      setError("Adicione pelo menos um exercício ao treino.");
+      return;
+    }
+    onSave({ id: plan?.id ?? createId(), name: name.trim(), day, exercises: cleanedExercises });
+  }
+
+  function updateExercise(id: string, changes: Partial<Omit<GymExercise, "id">>) {
+    setExercises((current) => current.map((exercise) => exercise.id === id ? { ...exercise, ...changes } : exercise));
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="activity-modal gym-modal" role="dialog" aria-modal="true" aria-labelledby="gym-modal-title">
+        <div className="modal-heading">
+          <div><span className="eyebrow">PLANEJAMENTO DE TREINO</span><h2 id="gym-modal-title">{plan ? "Editar treino" : "Novo treino"}</h2></div>
+          <button type="button" className="icon-button modal-close" onClick={onClose} aria-label="Fechar"><X size={19} /></button>
+        </div>
+        <form className="activity-form" onSubmit={submit}>
+          <label className="form-field"><span>Nome do treino</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="Ex.: Treino A — superiores" autoFocus /></label>
+          <label className="form-field"><span>Dia da semana</span><select value={day} onChange={(event) => setDay(Number(event.target.value))}>{dayLabels.map((label, index) => <option key={label} value={index}>{label}</option>)}</select></label>
+          <div className="gym-exercises-heading"><strong>Exercícios</strong><button type="button" className="button button-quiet" onClick={() => setExercises((current) => [...current, createGymExercise()])}><Plus size={14} />Adicionar exercício</button></div>
+          <div className="gym-exercise-fields">
+            {exercises.map((exercise, index) => (
+              <div className="gym-exercise-form" key={exercise.id}>
+                <label className="form-field gym-exercise-name"><span>Exercício {index + 1}</span><input value={exercise.name} onChange={(event) => updateExercise(exercise.id, { name: event.target.value })} placeholder="Ex.: Supino reto" /></label>
+                <label className="form-field"><span>Séries</span><input type="number" min="1" max="99" value={exercise.sets} onChange={(event) => updateExercise(exercise.id, { sets: Math.max(1, Number(event.target.value)) })} /></label>
+                <label className="form-field"><span>Repetições</span><input value={exercise.reps} onChange={(event) => updateExercise(exercise.id, { reps: event.target.value })} placeholder="8-12" /></label>
+                <label className="form-field"><span>Carga</span><input value={exercise.weight} onChange={(event) => updateExercise(exercise.id, { weight: event.target.value })} placeholder="Opcional" /></label>
+                <label className="form-field"><span>Descanso</span><input value={exercise.rest} onChange={(event) => updateExercise(exercise.id, { rest: event.target.value })} placeholder="60s" /></label>
+                {exercises.length > 1 && <button type="button" className="icon-button delete-action gym-remove-exercise" onClick={() => setExercises((current) => current.filter((item) => item.id !== exercise.id))} aria-label={`Remover exercício ${index + 1}`}><Trash2 size={15} /></button>}
+              </div>
+            ))}
+          </div>
+          {error && <p className="form-error" role="alert">{error}</p>}
+          <div className="form-actions"><button type="button" className="button button-quiet" onClick={onClose}>Cancelar</button><button type="submit" className="button button-primary"><Check size={16} />{plan ? "Salvar treino" : "Criar treino"}</button></div>
+        </form>
+      </section>
+    </div>
+  );
 }
 
 function requestVibration(pattern: number[]) {
@@ -651,6 +761,7 @@ export default function App() {
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [tasks, setTasks] = useState<PlannerTask[]>([]);
   const [notes, setNotes] = useState<PlannerNote[]>([]);
+  const [gymPlans, setGymPlans] = useState<GymPlan[]>([]);
   const [activeView, setActiveView] = useState<View>("Dashboard");
   const [activeCategory, setActiveCategory] = useState<Category | "Todas">("Todas");
   const [selectedDate, setSelectedDate] = useState(new Date());
@@ -666,6 +777,10 @@ export default function App() {
   const [storageReady, setStorageReady] = useState(false);
   const [notesReady, setNotesReady] = useState(false);
   const [notesError, setNotesError] = useState("");
+  const [gymReady, setGymReady] = useState(false);
+  const [gymError, setGymError] = useState("");
+  const [editingGymPlan, setEditingGymPlan] = useState<GymPlan | null>(null);
+  const [isGymFormOpen, setIsGymFormOpen] = useState(false);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [noteSearch, setNoteSearch] = useState("");
   const [storageError, setStorageError] = useState("");
@@ -676,6 +791,7 @@ export default function App() {
   const firedAlarmsRef = useRef(new Set<string>());
   const syncedTasksRef = useRef<Map<string, string> | null>(null);
   const syncedNotesRef = useRef<Map<string, string> | null>(null);
+  const syncedGymPlansRef = useRef<Map<string, string> | null>(null);
 
   useEffect(() => {
     if (!firebaseConfigured || !auth) {
@@ -688,13 +804,17 @@ export default function App() {
       setAuthReady(true);
       setTasks([]);
       setNotes([]);
+      setGymPlans([]);
       setStorageReady(false);
       setNotesReady(false);
+      setGymReady(false);
       setStorageError("");
       setNotesError("");
+      setGymError("");
       setMigrationAvailable(false);
       syncedTasksRef.current = null;
       syncedNotesRef.current = null;
+      syncedGymPlansRef.current = null;
     }, (error) => {
       console.error("Não foi possível verificar a sessão do Plan-ner.", error);
       setAuthError("Não foi possível verificar seu acesso. Recarregue a página e tente novamente.");
@@ -707,6 +827,7 @@ export default function App() {
 
     setStorageReady(false);
     setNotesReady(false);
+    setGymReady(false);
     let tasksLoaded = false;
     let notesLoaded = false;
     let tasksEmpty = false;
@@ -779,10 +900,35 @@ export default function App() {
         setNotesError("Não foi possível acessar suas notas na nuvem. Confira a conexão e as regras do Firestore.");
       },
     );
+    const stopGymPlans = onSnapshot(
+      collection(db, "users", user.uid, "gymPlans"),
+      { includeMetadataChanges: true },
+      (snapshot) => {
+        if (snapshot.metadata.fromCache) {
+          setGymError("Conecte-se à internet para carregar e sincronizar seus treinos.");
+          return;
+        }
+        const stored = snapshot.docs.map((item) => item.data());
+        if (!stored.every(isGymPlan)) {
+          setGymError("Existem treinos inválidos na nuvem. Os treinos não foram carregados.");
+          return;
+        }
+        const loadedPlans = stored as GymPlan[];
+        syncedGymPlansRef.current = new Map(loadedPlans.map((plan) => [plan.id, JSON.stringify(plan)]));
+        setGymPlans(loadedPlans);
+        setGymError("");
+        setGymReady(true);
+      },
+      (error) => {
+        console.error("Não foi possível carregar os treinos do Firestore.", error);
+        setGymError("Não foi possível acessar seus treinos na nuvem. Confira a conexão e as regras do Firestore.");
+      },
+    );
 
     return () => {
       stopTasks();
       stopNotes();
+      stopGymPlans();
     };
   }, [user]);
 
@@ -827,6 +973,27 @@ export default function App() {
       setNotesError("Não foi possível sincronizar as notas. Suas alterações podem não ter sido salvas.");
     });
   }, [notes, user, notesReady]);
+
+  useEffect(() => {
+    const firestore = db;
+    if (!user || !firestore || !gymReady || !syncedGymPlansRef.current) return;
+    const previous = syncedGymPlansRef.current;
+    const current = new Map(gymPlans.map((plan) => [plan.id, JSON.stringify(plan)]));
+    const changes = gymPlans.filter((plan) => previous.get(plan.id) !== JSON.stringify(plan));
+    const removed = [...previous.keys()].filter((id) => !current.has(id));
+    const writes = [
+      ...changes.map((plan) => setDoc(doc(firestore, "users", user.uid, "gymPlans", plan.id), plan)),
+      ...removed.map((id) => deleteDoc(doc(firestore, "users", user.uid, "gymPlans", id))),
+    ];
+    if (!writes.length) return;
+    void Promise.all(writes).then(() => {
+      syncedGymPlansRef.current = current;
+      setGymError("");
+    }).catch((error: unknown) => {
+      console.error("Não foi possível sincronizar os treinos com o Firestore.", error);
+      setGymError("Não foi possível sincronizar os treinos. Suas alterações podem não ter sido salvas.");
+    });
+  }, [gymPlans, user, gymReady]);
 
   useEffect(() => {
     try {
@@ -1115,6 +1282,27 @@ export default function App() {
     setIsFormOpen(true);
   }
 
+  function openGymPlan(plan: GymPlan | null = null) {
+    setEditingGymPlan(plan);
+    setIsGymFormOpen(true);
+  }
+
+  function saveGymPlan(plan: GymPlan) {
+    setGymPlans((current) => {
+      const exists = current.some((item) => item.id === plan.id);
+      return exists ? current.map((item) => item.id === plan.id ? plan : item) : [...current, plan];
+    });
+    setIsGymFormOpen(false);
+    setEditingGymPlan(null);
+    setToast(editingGymPlan ? "Treino atualizado com sucesso." : "Treino criado com sucesso.");
+  }
+
+  function removeGymPlan(plan: GymPlan) {
+    if (!window.confirm(`Excluir o treino "${plan.name}"? Esta ação não pode ser desfeita.`)) return;
+    setGymPlans((current) => current.filter((item) => item.id !== plan.id));
+    setToast("Treino excluído.");
+  }
+
   async function installApp() {
     if (!installPrompt) return;
     try {
@@ -1301,7 +1489,7 @@ export default function App() {
           </a>
           {!isInstalled && <button className="button button-install mobile-install" onClick={() => setIsInstallHelpOpen(true)}><Download size={15} />Instalar</button>}
           <button className="icon-button mobile-account" onClick={() => void leaveAccount()} aria-label="Sair da conta"><LogOut size={16} /></button>
-          <button className="button button-primary mobile-add" onClick={activeView === "Notas" ? createNewNote : openCreate}><Plus size={16} />{activeView === "Notas" ? "Nota" : "Nova"}</button>
+          <button className="button button-primary mobile-add" onClick={activeView === "Notas" ? createNewNote : activeView === "Academia" ? () => openGymPlan() : openCreate}><Plus size={16} />{activeView === "Notas" ? "Nota" : activeView === "Academia" ? "Treino" : "Nova"}</button>
         </header>
 
         <div className="page-wrap">
@@ -1309,11 +1497,13 @@ export default function App() {
             <div>
               <span className="eyebrow">{formatDate(new Date(), { weekday: "long", day: "numeric", month: "long" })}</span>
               <h1>{activeView}</h1>
-              <p>{activeView === "Dashboard" ? "Visão geral das suas atividades" : activeView === "Inteligente" ? "Ideias práticas para uma rotina mais leve" : activeView === "Semana" ? "Uma visão clara da sua semana" : activeView === "Notas" ? "Anote ideias, organize pensamentos e planeje seus projetos" : "Organize suas atividades do dia"}</p>
+              <p>{activeView === "Dashboard" ? "Visão geral das suas atividades" : activeView === "Inteligente" ? "Ideias práticas para uma rotina mais leve" : activeView === "Semana" ? "Uma visão clara da sua semana" : activeView === "Academia" ? "Organize seus treinos e acompanhe seus exercícios" : activeView === "Notas" ? "Anote ideias, organize pensamentos e planeje seus projetos" : "Organize suas atividades do dia"}</p>
             </div>
             <div className="page-header-actions">
               {!isInstalled && <button className="button button-install desktop-install" onClick={() => setIsInstallHelpOpen(true)}><Download size={16} />Instalar app</button>}
-              {activeView === "Notas"
+              {activeView === "Academia"
+                ? <button className="button button-primary desktop-add" onClick={() => openGymPlan()}><Plus size={18} strokeWidth={2.5} />Novo treino</button>
+                : activeView === "Notas"
                 ? <button className="button button-primary desktop-add" onClick={createNewNote}><Plus size={18} strokeWidth={2.5} />Nova nota</button>
                 : <button className="button button-primary desktop-add" onClick={openCreate}><Plus size={18} strokeWidth={2.5} />Nova atividade</button>}
             </div>
@@ -1329,7 +1519,7 @@ export default function App() {
             <div className="loading-state"><span className="loading-spinner" />Carregando suas atividades...</div>
           ) : (
             <>
-              {activeView !== "Notas" && <div className="mobile-categories" aria-label="Filtrar atividades por categoria">
+              {activeView !== "Notas" && activeView !== "Academia" && <div className="mobile-categories" aria-label="Filtrar atividades por categoria">
                 <button className={activeCategory === "Todas" ? "selected" : ""} onClick={() => setActiveCategory("Todas")}>Todas</button>
                 {categories.map((category) => <button key={category} className={activeCategory === category ? `selected ${categoryClass[category]}` : categoryClass[category]} onClick={() => setActiveCategory(category)}><i />{category}</button>)}
               </div>}
@@ -1394,7 +1584,6 @@ export default function App() {
                       <div className="progress-detail"><span className="detail-dot pending-dot" />Pendentes <strong>{tasks.length - completedTotal}</strong></div>
                     </aside>
                   </section>
-                  <footer className="page-footer"><span>Feito para deixar sua rotina mais leve.</span><span className="footer-date"><span />Dados na sua conta</span></footer>
                 </>
               )}
 
@@ -1438,6 +1627,49 @@ export default function App() {
                     <article className="panel smart-card"><span className="smart-card-icon purple"><TrendingUp size={18} /></span><h3>Seu progresso</h3><p>{tasks.length ? `${completedTotal} de ${tasks.length} atividades concluídas (${progress}%). Cada tarefa finalizada é um passo importante.` : "Seu progresso começa quando você registra sua primeira atividade."}</p><div className="smart-progress"><span style={{ width: `${progress}%` }} /></div></article>
                   </div>
                   <div className="smart-tip"><span><Sparkles size={17} /></span><p><strong>Uma dica para você</strong><br />Experimente dividir atividades grandes em etapas menores. Fica mais fácil começar — e celebrar cada avanço.</p></div>
+                </section>
+              )}
+
+              {activeView === "Academia" && (
+                <section className="gym-view">
+                  <div className="gym-intro panel">
+                    <span className="gym-intro-icon"><Dumbbell size={22} /></span>
+                    <div><span className="eyebrow">SEU PLANO DE TREINO</span><h2>Treine no seu ritmo.</h2><p>Organize seus exercícios por dia, com séries, repetições, carga e descanso.</p></div>
+                    <button className="button button-primary gym-intro-add" onClick={() => openGymPlan()}><Plus size={16} />Novo treino</button>
+                  </div>
+                  {gymError && <div className="storage-alert" role="alert">{gymError}</div>}
+                  {!gymReady ? <div className="loading-state"><span className="loading-spinner" />Carregando seus treinos...</div> : gymPlans.length === 0 ? (
+                    <div className="panel gym-empty">
+                      <span className="gym-empty-icon"><Dumbbell size={25} /></span>
+                      <h3>Seu próximo treino começa aqui.</h3>
+                      <p>Crie sua rotina e organize os exercícios da semana.</p>
+                      <button className="button button-primary" onClick={() => openGymPlan()}><Plus size={16} />Criar primeiro treino</button>
+                    </div>
+                  ) : (
+                    <div className="gym-week-grid">
+                      {dayLabels.map((day, dayIndex) => {
+                        const dayPlans = gymPlans.filter((plan) => plan.day === dayIndex);
+                        return <section className="gym-day-column" key={day}>
+                          <div className="gym-day-heading"><h3>{day}</h3><span>{dayPlans.length}</span></div>
+                          {dayPlans.length ? dayPlans.map((plan) => (
+                            <article className="panel gym-plan-card" key={plan.id}>
+                              <div className="gym-plan-heading">
+                                <h4>{plan.name}</h4>
+                                <div><button className="icon-button" onClick={() => openGymPlan(plan)} aria-label={`Editar ${plan.name}`}><Edit2 size={15} /></button><button className="icon-button delete-action" onClick={() => removeGymPlan(plan)} aria-label={`Excluir ${plan.name}`}><Trash2 size={15} /></button></div>
+                              </div>
+                              <ul className="gym-exercise-list">{plan.exercises.map((exercise) => (
+                                <li key={exercise.id}>
+                                  <strong>{exercise.name}</strong>
+                                  <span>{exercise.sets} séries × {exercise.reps} repetições{exercise.weight ? ` · ${exercise.weight}` : ""}</span>
+                                  {exercise.rest && <small><Clock3 size={12} />Descanso: {exercise.rest}</small>}
+                                </li>
+                              ))}</ul>
+                            </article>
+                          )) : <p className="gym-day-empty">Sem treino planejado</p>}
+                        </section>;
+                      })}
+                    </div>
+                  )}
                 </section>
               )}
 
@@ -1495,6 +1727,10 @@ export default function App() {
               )}
             </>
           )}
+          <footer className="page-footer">
+            {activeView === "Dashboard" && <><span>Feito para deixar sua rotina mais leve.</span><span className="footer-date"><span />Dados na sua conta</span></>}
+            <span className="footer-credit">Desenvolvido por Gleydes Oliveira</span>
+          </footer>
         </div>
       </main>
 
@@ -1510,6 +1746,12 @@ export default function App() {
         onTestAlarm={testAlarm}
         onRequestNotifications={() => { void requestNotifications(); }}
         notificationPermission={notificationPermission}
+      />}
+      {isGymFormOpen && <GymPlanModal
+        key={editingGymPlan?.id ?? "new-gym-plan"}
+        plan={editingGymPlan}
+        onClose={() => { setIsGymFormOpen(false); setEditingGymPlan(null); }}
+        onSave={saveGymPlan}
       />}
       {isInstallHelpOpen && <InstallHelpDialog canInstall={installPrompt !== null} onClose={() => setIsInstallHelpOpen(false)} onInstall={installApp} />}
       {toast && <div className="toast" role="status"><CheckCircle2 size={18} />{toast}</div>}

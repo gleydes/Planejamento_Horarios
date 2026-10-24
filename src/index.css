@@ -272,6 +272,7 @@ button:disabled { cursor: not-allowed; opacity: .6; }
 .detail-dot { width: 7px; height: 7px; border-radius: 3px; background: #3478f6; }
 .pending-dot { background: #e5eaf2; }
 .page-footer { display: flex; justify-content: space-between; gap: 12px; margin-top: 18px; color: #a1aab8; font-size: 9px; }
+.footer-credit { margin-left: auto; color: #8692a3; font-weight: 600; }
 .footer-date { display: inline-flex; align-items: center; gap: 6px; }
 .footer-date span { width: 6px; height: 6px; border-radius: 50%; background: #3fc18a; }
 
@@ -323,6 +324,45 @@ button:disabled { cursor: not-allowed; opacity: .6; }
 .smart-tip > span { display: grid; flex: 0 0 31px; width: 31px; height: 31px; place-items: center; color: #8268dd; border-radius: 9px; background: #f0edff; }
 .smart-tip p { margin: 0; color: #828da1; font-size: 10px; line-height: 1.6; }
 .smart-tip strong { color: #414d64; font-size: 11px; }
+
+.gym-view { display: grid; gap: 17px; }
+.gym-intro { display: flex; align-items: center; gap: 14px; padding: 20px 22px; }
+.gym-intro-icon, .gym-empty-icon { display: grid; flex: 0 0 45px; width: 45px; height: 45px; place-items: center; color: #2d9a74; border-radius: 13px; background: #e9f8f1; }
+.gym-intro h2 { margin: 4px 0; color: #253149; font: 800 19px "Manrope", sans-serif; letter-spacing: -.5px; }
+.gym-intro p { margin: 0; color: #8590a3; font-size: 11px; }
+.gym-intro-add { margin-left: auto; }
+.gym-week-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); align-items: start; gap: 10px; }
+.gym-day-column { display: grid; align-content: start; gap: 8px; min-width: 0; }
+.gym-day-heading { display: flex; align-items: center; gap: 6px; min-height: 27px; }
+.gym-day-heading h3 { margin: 0; color: #64748b; font-size: 10px; font-weight: 700; }
+.gym-day-heading span { display: grid; min-width: 18px; height: 18px; padding: 0 4px; place-items: center; color: #78869a; font-size: 9px; border-radius: 99px; background: #e9edf3; }
+.gym-plan-card { min-width: 0; padding: 12px 10px; }
+.gym-plan-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid #edf0f5; }
+.gym-plan-heading h4 { margin: 5px 0 0; color: #2e3a50; font: 700 11px/1.4 "Manrope", sans-serif; overflow-wrap: anywhere; }
+.gym-plan-heading > div { display: flex; flex: 0 0 auto; margin: -4px -5px 0 0; }
+.gym-plan-heading .icon-button { width: 25px; height: 25px; }
+.gym-exercise-list { display: grid; gap: 10px; margin: 10px 0 0; padding: 0; list-style: none; }
+.gym-exercise-list li { display: grid; gap: 3px; min-width: 0; }
+.gym-exercise-list strong { color: #48566d; font-size: 10px; overflow-wrap: anywhere; }
+.gym-exercise-list span { color: #8793a5; font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
+.gym-exercise-list small { display: inline-flex; align-items: center; gap: 4px; color: #a0a9b6; font-size: 8px; }
+.gym-day-empty { margin: 0; padding: 12px 8px; color: #a1aab8; font-size: 9px; border: 1px dashed #e2e7ef; border-radius: 9px; }
+.gym-empty { display: flex; flex-direction: column; align-items: center; padding: 38px 18px; text-align: center; }
+.gym-empty-icon { flex-basis: 52px; width: 52px; height: 52px; }
+.gym-empty h3 { margin: 13px 0 5px; color: #344258; font: 700 14px "Manrope", sans-serif; }
+.gym-empty p { margin: 0 0 15px; color: #919cad; font-size: 11px; }
+.gym-empty .button { min-height: 36px; font-size: 10px; }
+.gym-modal { width: min(100%, 650px); }
+.gym-exercises-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.gym-exercises-heading > strong { color: #46536a; font-size: 11px; }
+.gym-exercises-heading .button { min-height: 31px; padding: 0 9px; font-size: 9px; }
+.gym-exercise-fields { display: grid; gap: 9px; max-height: 36vh; overflow-y: auto; }
+.gym-exercise-form { position: relative; display: grid; grid-template-columns: minmax(110px, 2fr) repeat(4, minmax(55px, 1fr)) 26px; align-items: end; gap: 7px; padding: 10px; border: 1px solid #edf0f5; border-radius: 9px; background: #fbfcfe; }
+.gym-exercise-form .form-field { gap: 4px; font-size: 9px; }
+.gym-exercise-form .form-field input { min-height: 34px; padding: 6px 7px; font-size: 10px; }
+.gym-exercise-name { min-width: 0; }
+.gym-remove-exercise { width: 25px; height: 30px; }
+.form-error { margin: 0; color: #b42318; font-size: 10px; }
 
 .notes-workspace { display: grid; grid-template-columns: minmax(220px, 270px) minmax(0, 1fr); min-height: min(690px, calc(100vh - 175px)); overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: #fff; box-shadow: 0 2px 8px rgba(30, 50, 85, .025); }
 .notes-list-panel { display: flex; flex-direction: column; min-width: 0; border-right: 1px solid #e9edf3; background: #fbfcfe; }
@@ -467,6 +507,7 @@ button:disabled { cursor: not-allowed; opacity: .6; }
   .dashboard-grid { grid-template-columns: minmax(0, 1.55fr) minmax(220px, .8fr); }
   .week-grid { gap: 5px; }
   .week-day { padding: 10px 6px; }
+  .gym-week-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
 
 @media (max-width: 850px) {
@@ -481,6 +522,7 @@ button:disabled { cursor: not-allowed; opacity: .6; }
   .progress-detail { grid-column: auto; }
   .week-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .week-day { min-height: 170px; }
+  .gym-week-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @media (max-width: 640px) {
@@ -552,6 +594,18 @@ button:disabled { cursor: not-allowed; opacity: .6; }
   .week-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .week-day { min-height: 165px; padding: 11px 9px; }
   .smart-view { gap: 12px; }
+  .gym-view { gap: 12px; }
+  .gym-intro { align-items: flex-start; flex-wrap: wrap; padding: 15px 13px; }
+  .gym-intro h2 { font-size: 16px; }
+  .gym-intro p { font-size: 10px; line-height: 1.5; }
+  .gym-intro-icon { flex-basis: 40px; width: 40px; height: 40px; }
+  .gym-intro-add { margin-left: auto; min-height: 34px; padding: 0 10px; font-size: 9px; }
+  .gym-week-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 9px; }
+  .gym-day-heading h3 { font-size: 9px; }
+  .gym-plan-card { padding: 10px 8px; }
+  .gym-exercise-form { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; }
+  .gym-exercise-name { grid-column: 1 / -1; padding-right: 28px; }
+  .gym-remove-exercise { position: absolute; top: 6px; right: 5px; }
   .smart-intro { align-items: flex-start; padding: 17px 14px; }
   .smart-intro h2 { font-size: 16px; }
   .smart-intro p { font-size: 10px; line-height: 1.5; }
@@ -560,6 +614,8 @@ button:disabled { cursor: not-allowed; opacity: .6; }
   .smart-card { min-height: 165px; padding: 15px; }
   .smart-tip { align-items: flex-start; padding: 12px; }
   .notes-workspace { grid-template-columns: minmax(0, 1fr); min-height: calc(100vh - 235px); }
+  .page-footer { gap: 6px; }
+  .footer-credit { margin-left: 0; }
   .notes-list-panel { max-height: 185px; border-right: 0; border-bottom: 1px solid #e9edf3; }
   .notes-list-heading { padding: 12px 13px 9px; }
   .notes-search { min-height: 31px; margin-bottom: 7px; }
@@ -585,7 +641,7 @@ button:disabled { cursor: not-allowed; opacity: .6; }
   .note-block-actions .icon-button { width: 22px; height: 22px; }
   .note-insert-toolbar { gap: 4px; margin-top: 20px; }
   .note-insert-toolbar button { padding: 0 6px; }
-  .bottom-nav { position: fixed; inset: auto 0 0; z-index: 20; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); min-height: 60px; padding: 5px 6px max(5px, env(safe-area-inset-bottom)); border-top: 1px solid #e8ecf2; background: rgba(255,255,255,.97); box-shadow: 0 -4px 14px rgba(28, 44, 67, .04); backdrop-filter: blur(12px); }
+  .bottom-nav { position: fixed; inset: auto 0 0; z-index: 20; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); min-height: 60px; padding: 5px 6px max(5px, env(safe-area-inset-bottom)); border-top: 1px solid #e8ecf2; background: rgba(255,255,255,.97); box-shadow: 0 -4px 14px rgba(28, 44, 67, .04); backdrop-filter: blur(12px); }
   .bottom-nav button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-width: 0; padding: 3px 1px; color: #8a96a8; font-size: 7px; font-weight: 600; border: 0; border-radius: 8px; background: transparent; cursor: pointer; }
   .bottom-nav button.active { color: #3478f6; background: #f2f6ff; }
   .modal-backdrop { align-items: end; padding: 0; }
