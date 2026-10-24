@@ -1,10 +1,20 @@
-import { useEffect, useMemo, useState } from "react";
-import type { FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { FormEvent, KeyboardEvent as ReactKeyboardEvent } from "react";
+import { GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut, type User } from "firebase/auth";
+import {
+  collection,
+  deleteDoc,
+  doc,
+  onSnapshot,
+  setDoc,
+  writeBatch,
+} from "firebase/firestore";
 import {
   Activity,
   ArrowDownRight,
   ArrowRight,
   ArrowUpRight,
+  BellRing,
   BarChart3,
   Calendar,
   CalendarDays,
@@ -13,22 +23,59 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock3,
+  Download,
   Edit2,
+  FileText,
   Filter,
+  Heading1,
   Lightbulb,
   ListTodo,
+  List,
+  ListChecks,
   MoreHorizontal,
   Plus,
+  Quote,
+  Search,
   Sparkles,
+  StickyNote,
   Target,
   Trash2,
   TrendingUp,
   X,
+  Volume2,
+  Vibrate,
+  Minus,
+  ArrowUp,
+  ArrowDown,
+  LogOut,
+  ShieldCheck,
 } from "lucide-react";
+import { auth, db, firebaseConfigured } from "./firebase";
 
 type Category = "Trabalho" | "Pessoal" | "Saúde" | "Estudo" | "Lazer" | "Outro";
 type Priority = "Alta" | "Média" | "Baixa";
-type View = "Dashboard" | "Dia" | "Semana" | "Inteligente";
+type View = "Dashboard" | "Dia" | "Semana" | "Inteligente" | "Notas";
+type NoteBlockType = "paragraph" | "heading" | "bullet" | "checklist" | "quote" | "divider";
+
+interface NoteBlock {
+  id: string;
+  type: NoteBlockType;
+  text: string;
+  checked?: boolean;
+}
+
+interface PlannerNote {
+  id: string;
+  title: string;
+  blocks: NoteBlock[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface InstallPromptEvent extends Event {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
+}
 
 interface PlannerTask {
   id: string;
@@ -40,15 +87,22 @@ interface PlannerTask {
   priority: Priority;
   completed: boolean;
   notes: string;
+  alarmEnabled?: boolean;
+  alarmSound?: boolean;
+  alarmVibration?: boolean;
 }
 
+type NotificationPermissionState = NotificationPermission | "unsupported";
+
 const STORAGE_KEY = "meu-planner:activities:v1";
+const NOTES_STORAGE_KEY = "meu-planner:notes:v1";
 const categories: Category[] = ["Trabalho", "Pessoal", "Saúde", "Estudo", "Lazer", "Outro"];
 const views: { label: View; icon: typeof CalendarDays }[] = [
   { label: "Dashboard", icon: BarChart3 },
   { label: "Dia", icon: Calendar },
   { label: "Semana", icon: CalendarDays },
   { label: "Inteligente", icon: Sparkles },
+  { label: "Notas", icon: FileText },
 ];
 
 const categoryClass: Record<Category, string> = {
@@ -113,6 +167,36 @@ function readStoredTasks(): PlannerTask[] {
   return parsed;
 }
 
+function isNoteBlock(value: unknown): value is NoteBlock {
+  if (typeof value !== "object" || value === null) return false;
+  const block = value as Record<string, unknown>;
+  return typeof block.id === "string"
+    && ["paragraph", "heading", "bullet", "checklist", "quote", "divider"].includes(String(block.type))
+    && typeof block.text === "string"
+    && (block.checked === undefined || typeof block.checked === "boolean");
+}
+
+function isPlannerNote(value: unknown): value is PlannerNote {
+  if (typeof value !== "object" || value === null) return false;
+  const note = value as Record<string, unknown>;
+  return typeof note.id === "string"
+    && typeof note.title === "string"
+    && Array.isArray(note.blocks)
+    && note.blocks.every(isNoteBlock)
+    && typeof note.createdAt === "string"
+    && typeof note.updatedAt === "string";
+}
+
+function readStoredNotes(): PlannerNote[] {
+  const stored = window.localStorage.getItem(NOTES_STORAGE_KEY);
+  if (!stored) return [];
+  const parsed: unknown = JSON.parse(stored);
+  if (!Array.isArray(parsed) || !parsed.every(isPlannerNote)) {
+    throw new Error("As notas salvas não estão em um formato válido.");
+  }
+  return parsed;
+}
+
 function isPlannerTask(value: unknown): value is PlannerTask {
   if (typeof value !== "object" || value === null) return false;
   const task = value as Record<string, unknown>;
@@ -125,7 +209,10 @@ function isPlannerTask(value: unknown): value is PlannerTask {
     && categories.includes(task.category as Category)
     && ["Alta", "Média", "Baixa"].includes(String(task.priority))
     && typeof task.completed === "boolean"
-    && typeof task.notes === "string";
+    && typeof task.notes === "string"
+    && (task.alarmEnabled === undefined || typeof task.alarmEnabled === "boolean")
+    && (task.alarmSound === undefined || typeof task.alarmSound === "boolean")
+    && (task.alarmVibration === undefined || typeof task.alarmVibration === "boolean");
 }
 
 function formatDuration(minutes: number) {
@@ -136,14 +223,176 @@ function formatDuration(minutes: number) {
   return `${hours}h ${remainder}min`;
 }
 
+function requestVibration(pattern: number[]) {
+  if (!("vibrate" in navigator)) return false;
+  try {
+    return navigator.vibrate(pattern);
+  } catch (error) {
+    console.error("Não foi possível iniciar a vibração do alarme.", error);
+    return false;
+  }
+}
+
+function createNoteBlock(type: NoteBlockType = "paragraph"): NoteBlock {
+  return { id: createId(), type, text: "", ...(type === "checklist" ? { checked: false } : {}) };
+}
+
+function createNote(): PlannerNote {
+  const now = new Date().toISOString();
+  return {
+    id: createId(),
+    title: "",
+    blocks: [createNoteBlock()],
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function formatNoteTime(date: string) {
+  const parsed = new Date(date);
+  if (Number.isNaN(parsed.getTime())) return "agora";
+  const todayKey = localDateKey(new Date());
+  if (localDateKey(parsed) === todayKey) return formatDate(parsed, { hour: "2-digit", minute: "2-digit" });
+  return formatDate(parsed, { day: "numeric", month: "short" });
+}
+
+function NoteEditor({
+  note,
+  onUpdate,
+  onAddBlock,
+  onUpdateBlock,
+  onRemoveBlock,
+  onMoveBlock,
+  onDelete,
+}: {
+  note: PlannerNote;
+  onUpdate: (changes: Partial<Pick<PlannerNote, "title">>) => void;
+  onAddBlock: (type: NoteBlockType, afterId?: string) => string;
+  onUpdateBlock: (blockId: string, changes: Partial<Pick<NoteBlock, "text" | "checked">>) => void;
+  onRemoveBlock: (blockId: string) => void;
+  onMoveBlock: (blockId: string, direction: -1 | 1) => void;
+  onDelete: () => void;
+}) {
+  const blockRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
+  const [focusedBlockId, setFocusedBlockId] = useState<string | null>(null);
+
+  useEffect(() => {
+    for (const element of Object.values(blockRefs.current)) {
+      if (!element) continue;
+      element.style.height = "auto";
+      element.style.height = `${element.scrollHeight}px`;
+    }
+  }, [note.id, note.blocks]);
+
+  function addBlock(type: NoteBlockType) {
+    const blockId = onAddBlock(type, focusedBlockId ?? note.blocks[note.blocks.length - 1]?.id);
+    window.requestAnimationFrame(() => blockRefs.current[blockId]?.focus());
+  }
+
+  function handleBlockKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>, block: NoteBlock) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      const blockId = onAddBlock(block.type === "divider" ? "paragraph" : block.type, block.id);
+      window.requestAnimationFrame(() => blockRefs.current[blockId]?.focus());
+    } else if (event.key === "Backspace" && !block.text && note.blocks.length > 1) {
+      event.preventDefault();
+      const currentIndex = note.blocks.findIndex((item) => item.id === block.id);
+      const previousBlock = note.blocks[currentIndex - 1];
+      onRemoveBlock(block.id);
+      window.requestAnimationFrame(() => {
+        if (previousBlock) blockRefs.current[previousBlock.id]?.focus();
+      });
+    }
+  }
+
+  return (
+    <section className="notes-editor-panel" aria-label="Editor de notas">
+      <div className="notes-editor-topbar">
+        <div className="notes-breadcrumb"><FileText size={14} /><span>Minhas notas</span><ChevronRight size={13} /><strong>{note.title.trim() || "Sem título"}</strong></div>
+        <div className="notes-editor-actions">
+          <span className="note-save-state"><Check size={13} />Salvo automaticamente</span>
+          <button className="icon-button note-delete-button" onClick={onDelete} aria-label="Excluir nota" title="Excluir nota"><Trash2 size={16} /></button>
+        </div>
+      </div>
+      <div className="note-canvas">
+        <span className="note-page-icon"><StickyNote size={25} /></span>
+        <input className="note-title-input" value={note.title} onChange={(event) => onUpdate({ title: event.target.value })} placeholder="Sem título" aria-label="Título da nota" maxLength={120} />
+        <div className="note-meta-line">Editado {formatNoteTime(note.updatedAt)}</div>
+
+        <div className="note-blocks">
+          {note.blocks.map((block, index) => (
+            <div key={block.id} className={`note-block note-block-${block.type} ${focusedBlockId === block.id ? "is-focused" : ""}`}>
+              {block.type === "divider" ? (
+                <>
+                  <div className="note-divider-block" role="separator" />
+                  <div className="note-block-actions">
+                    <button className="icon-button" onClick={() => onMoveBlock(block.id, -1)} disabled={index === 0} aria-label="Mover bloco para cima"><ArrowUp size={13} /></button>
+                    <button className="icon-button" onClick={() => onMoveBlock(block.id, 1)} disabled={index === note.blocks.length - 1} aria-label="Mover bloco para baixo"><ArrowDown size={13} /></button>
+                    <button className="icon-button" onClick={() => onRemoveBlock(block.id)} aria-label="Excluir divisor"><X size={13} /></button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  {block.type === "bullet" && <span className="note-bullet" aria-hidden="true">•</span>}
+                  {block.type === "checklist" && <button className={`note-checklist-button ${block.checked ? "checked" : ""}`} aria-label={block.checked ? "Marcar item como pendente" : "Marcar item como concluído"} onClick={() => onUpdateBlock(block.id, { checked: !block.checked })}>{block.checked && <Check size={12} />}</button>}
+                  {block.type === "quote" && <Quote className="note-quote-icon" size={16} aria-hidden="true" />}
+                  <textarea
+                    ref={(element) => { blockRefs.current[block.id] = element; }}
+                    value={block.text}
+                    rows={1}
+                    onFocus={() => setFocusedBlockId(block.id)}
+                    onBlur={() => setFocusedBlockId((current) => current === block.id ? null : current)}
+                    onChange={(event) => {
+                      onUpdateBlock(block.id, { text: event.target.value });
+                      event.target.style.height = "auto";
+                      event.target.style.height = `${event.target.scrollHeight}px`;
+                    }}
+                    onKeyDown={(event) => handleBlockKeyDown(event, block)}
+                    className={block.checked ? "checked-text" : ""}
+                    placeholder={block.type === "heading" ? "Título da seção" : block.type === "quote" ? "Escreva uma citação..." : index === 0 ? "Comece a escrever ou escolha um bloco abaixo..." : "Escreva algo..."}
+                    aria-label={block.type === "heading" ? "Título da seção" : block.type === "checklist" ? "Item de checklist" : block.type === "bullet" ? "Item com marcador" : block.type === "quote" ? "Citação" : "Parágrafo"}
+                  />
+                  <div className="note-block-actions">
+                    <button className="icon-button" onClick={() => onMoveBlock(block.id, -1)} disabled={index === 0} aria-label="Mover bloco para cima"><ArrowUp size={13} /></button>
+                    <button className="icon-button" onClick={() => onMoveBlock(block.id, 1)} disabled={index === note.blocks.length - 1} aria-label="Mover bloco para baixo"><ArrowDown size={13} /></button>
+                    <button className="icon-button" onClick={() => onRemoveBlock(block.id)} disabled={note.blocks.length === 1} aria-label="Excluir bloco"><X size={13} /></button>
+                  </div>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div className="note-insert-toolbar" aria-label="Adicionar bloco">
+          <span>Adicionar bloco</span>
+          <button onMouseDown={(event) => event.preventDefault()} onClick={() => addBlock("paragraph")} title="Parágrafo"><Plus size={14} /><span>Texto</span></button>
+          <button onMouseDown={(event) => event.preventDefault()} onClick={() => addBlock("heading")} title="Título"><Heading1 size={15} /><span>Título</span></button>
+          <button onMouseDown={(event) => event.preventDefault()} onClick={() => addBlock("bullet")} title="Lista com marcadores"><List size={15} /><span>Lista</span></button>
+          <button onMouseDown={(event) => event.preventDefault()} onClick={() => addBlock("checklist")} title="Checklist"><ListChecks size={15} /><span>Tarefa</span></button>
+          <button onMouseDown={(event) => event.preventDefault()} onClick={() => addBlock("quote")} title="Citação"><Quote size={14} /><span>Citação</span></button>
+          <button onMouseDown={(event) => event.preventDefault()} onClick={() => addBlock("divider")} title="Divisor"><Minus size={15} /><span>Divisor</span></button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function TaskForm({
   task,
   onClose,
   onSave,
+  onAlarmEnable,
+  onTestAlarm,
+  onRequestNotifications,
+  notificationPermission,
 }: {
   task: PlannerTask | null;
   onClose: () => void;
   onSave: (task: PlannerTask) => void;
+  onAlarmEnable: () => void;
+  onTestAlarm: (sound: boolean, vibration: boolean) => void;
+  onRequestNotifications: () => void;
+  notificationPermission: NotificationPermissionState;
 }) {
   const today = localDateKey(new Date());
   const [title, setTitle] = useState(task?.title ?? "");
@@ -153,6 +402,9 @@ function TaskForm({
   const [category, setCategory] = useState<Category>(task?.category ?? "Trabalho");
   const [priority, setPriority] = useState<Priority>(task?.priority ?? "Média");
   const [notes, setNotes] = useState(task?.notes ?? "");
+  const [alarmEnabled, setAlarmEnabled] = useState(task?.alarmEnabled ?? false);
+  const [alarmSound, setAlarmSound] = useState(task?.alarmSound ?? true);
+  const [alarmVibration, setAlarmVibration] = useState(task?.alarmVibration ?? true);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -174,6 +426,9 @@ function TaskForm({
       priority,
       completed: task?.completed ?? false,
       notes: notes.trim(),
+      alarmEnabled,
+      alarmSound,
+      alarmVibration,
     });
   }
 
@@ -229,6 +484,56 @@ function TaskForm({
               ))}
             </div>
           </fieldset>
+          <section className="alarm-settings" aria-labelledby="alarm-settings-title">
+            <label className="alarm-toggle">
+              <input
+                type="checkbox"
+                checked={alarmEnabled}
+                onChange={(event) => {
+                  const enabled = event.target.checked;
+                  setAlarmEnabled(enabled);
+                  if (enabled) onAlarmEnable();
+                }}
+              />
+              <span className="alarm-toggle-icon"><BellRing size={17} /></span>
+              <span className="alarm-toggle-copy">
+                <strong id="alarm-settings-title">Lembrete no horário da atividade</strong>
+                <small>Receba um aviso na hora de começar</small>
+              </span>
+            </label>
+            {alarmEnabled && (
+              <div className="alarm-options">
+                <label className="alarm-option">
+                  <input type="checkbox" checked={alarmSound} onChange={(event) => setAlarmSound(event.target.checked)} />
+                  <Volume2 size={15} />
+                  <span>Som</span>
+                </label>
+                <label className="alarm-option">
+                  <input type="checkbox" checked={alarmVibration} onChange={(event) => setAlarmVibration(event.target.checked)} />
+                  <Vibrate size={15} />
+                  <span>Vibração</span>
+                </label>
+                <button type="button" className="test-alarm-button" onClick={() => onTestAlarm(alarmSound, alarmVibration)}>
+                  Testar aviso
+                </button>
+                {notificationPermission === "default" && (
+                  <button type="button" className="notification-permission-button" onClick={onRequestNotifications}>
+                    Permitir notificações
+                  </button>
+                )}
+                {notificationPermission === "denied" && (
+                  <p className="alarm-notification-note">Notificações bloqueadas. Você pode liberá-las nas configurações do navegador.</p>
+                )}
+                {notificationPermission === "granted" && (
+                  <span className="notification-enabled"><Check size={12} />Notificações permitidas</span>
+                )}
+                {notificationPermission === "unsupported" && (
+                  <p className="alarm-notification-note">Este navegador não oferece notificações.</p>
+                )}
+                <p className="alarm-limit-note">O app precisa estar aberto para verificar o horário. Se ficar suspenso por mais de 2 minutos, o aviso pode não tocar. Notificações dependem das permissões e configurações do aparelho; com o app fechado, não há garantia.</p>
+              </div>
+            )}
+          </section>
           <label className="form-field form-field-full">
             <span>Observações <small>opcional</small></span>
             <textarea rows={3} maxLength={300} value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Adicione algum detalhe importante..." />
@@ -270,6 +575,7 @@ function TaskRow({
         <div className="task-meta">
           <span className={`category-label ${categoryClass[task.category]}`}><i />{task.category}</span>
           <span><Clock3 size={12} />{formatDuration(task.duration)}</span>
+          {task.alarmEnabled && <span className="task-alarm-label"><BellRing size={12} />Alarme</span>}
         </div>
       </div>
       <div className="task-actions">
@@ -291,41 +597,303 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
   );
 }
 
+function InstallHelpDialog({
+  canInstall,
+  onClose,
+  onInstall,
+}: {
+  canInstall: boolean;
+  onClose: () => void;
+  onInstall: () => void;
+}) {
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
+      <section className="install-modal" role="dialog" aria-modal="true" aria-labelledby="install-modal-title">
+        <div className="modal-heading">
+          <div>
+            <span className="eyebrow">SEMPRE À MÃO</span>
+            <h2 id="install-modal-title">Instale o Plan-ner</h2>
+            <p>Tenha um atalho no seu dispositivo e abra o app como um programa.</p>
+          </div>
+          <button type="button" className="icon-button modal-close" onClick={onClose} aria-label="Fechar instruções">
+            <X size={19} />
+          </button>
+        </div>
+        <div className="install-platforms">
+          <article className="install-platform"><span>1</span><div><strong>Android ou computador</strong><p>{canInstall ? "Toque em Instalar agora e confirme no aviso do navegador." : "Abra o menu do navegador (⋮) e escolha “Instalar app” ou “Instalar página”."}</p></div></article>
+          <article className="install-platform"><span>2</span><div><strong>iPhone ou iPad</strong><p>No Safari, toque em Compartilhar e escolha “Adicionar à Tela de Início”.</p></div></article>
+        </div>
+        <p className="install-secure-note">A instalação precisa de internet na primeira visita e de um endereço seguro (HTTPS).</p>
+        <div className="form-actions">
+          <button type="button" className="button button-quiet" onClick={onClose}>Agora não</button>
+          {canInstall && <button type="button" className="button button-primary" onClick={onInstall}><Download size={15} />Instalar agora</button>}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export default function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [signInPending, setSignInPending] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [tasks, setTasks] = useState<PlannerTask[]>([]);
+  const [notes, setNotes] = useState<PlannerNote[]>([]);
   const [activeView, setActiveView] = useState<View>("Dashboard");
   const [activeCategory, setActiveCategory] = useState<Category | "Todas">("Todas");
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [editingTask, setEditingTask] = useState<PlannerTask | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
+  const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null);
+  const [isInstallHelpOpen, setIsInstallHelpOpen] = useState(false);
+  const [isInstalled, setIsInstalled] = useState(() => window.matchMedia("(display-mode: standalone)").matches
+    || (navigator as Navigator & { standalone?: boolean }).standalone === true);
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermissionState>(
+    () => "Notification" in window ? Notification.permission : "unsupported",
+  );
   const [storageReady, setStorageReady] = useState(false);
+  const [notesReady, setNotesReady] = useState(false);
+  const [notesError, setNotesError] = useState("");
+  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
+  const [noteSearch, setNoteSearch] = useState("");
   const [storageError, setStorageError] = useState("");
+  const [migrationAvailable, setMigrationAvailable] = useState(false);
+  const [migrationPending, setMigrationPending] = useState(false);
   const [toast, setToast] = useState("");
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const firedAlarmsRef = useRef(new Set<string>());
+  const syncedTasksRef = useRef<Map<string, string> | null>(null);
+  const syncedNotesRef = useRef<Map<string, string> | null>(null);
 
   useEffect(() => {
-    try {
-      setTasks(readStoredTasks());
-    } catch {
-      setStorageError("Não foi possível carregar as atividades salvas neste navegador.");
-    } finally {
-      setStorageReady(true);
+    if (!firebaseConfigured || !auth) {
+      setAuthReady(true);
+      return;
     }
+
+    return onAuthStateChanged(auth, (nextUser) => {
+      setUser(nextUser);
+      setAuthReady(true);
+      setTasks([]);
+      setNotes([]);
+      setStorageReady(false);
+      setNotesReady(false);
+      setStorageError("");
+      setNotesError("");
+      setMigrationAvailable(false);
+      syncedTasksRef.current = null;
+      syncedNotesRef.current = null;
+    }, (error) => {
+      console.error("Não foi possível verificar a sessão do Plan-ner.", error);
+      setAuthError("Não foi possível verificar seu acesso. Recarregue a página e tente novamente.");
+      setAuthReady(true);
+    });
   }, []);
 
   useEffect(() => {
-    if (!storageReady || storageError) return;
-    try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
-    } catch {
-      setStorageError("Não foi possível salvar. Verifique o espaço disponível no navegador.");
+    if (!user || !db) return;
+
+    setStorageReady(false);
+    setNotesReady(false);
+    let tasksLoaded = false;
+    let notesLoaded = false;
+    let tasksEmpty = false;
+    let notesEmpty = false;
+
+    function checkLegacyData() {
+      if (!tasksLoaded || !notesLoaded || !tasksEmpty || !notesEmpty) return;
+      try {
+        setMigrationAvailable(readStoredTasks().length > 0 || readStoredNotes().length > 0);
+      } catch (error) {
+        console.error("Não foi possível verificar os dados locais antigos.", error);
+        setStorageError("Há dados antigos neste dispositivo que não puderam ser verificados para importação.");
+      }
     }
-  }, [tasks, storageReady, storageError]);
+
+    const stopTasks = onSnapshot(
+      collection(db, "users", user.uid, "activities"),
+      { includeMetadataChanges: true },
+      (snapshot) => {
+        if (snapshot.metadata.fromCache) {
+          setStorageError("Conecte-se à internet para carregar e sincronizar suas atividades.");
+          return;
+        }
+        const stored = snapshot.docs.map((item) => item.data());
+        if (!stored.every(isPlannerTask)) {
+          setStorageError("Existem atividades inválidas na nuvem. Os dados não foram carregados.");
+          return;
+        }
+        const loadedTasks = stored as PlannerTask[];
+        syncedTasksRef.current = new Map(loadedTasks.map((task) => [task.id, JSON.stringify(task)]));
+        setTasks(loadedTasks);
+        setStorageError("");
+        tasksLoaded = true;
+        tasksEmpty = snapshot.empty;
+        setStorageReady(true);
+        checkLegacyData();
+      },
+      (error) => {
+        console.error("Não foi possível carregar as atividades do Firestore.", error);
+        setStorageError("Não foi possível acessar suas atividades na nuvem. Confira a conexão e as regras do Firestore.");
+      },
+    );
+    const stopNotes = onSnapshot(
+      collection(db, "users", user.uid, "notes"),
+      { includeMetadataChanges: true },
+      (snapshot) => {
+        if (snapshot.metadata.fromCache) {
+          setNotesError("Conecte-se à internet para carregar e sincronizar suas notas.");
+          return;
+        }
+        const stored = snapshot.docs.map((item) => item.data());
+        if (!stored.every(isPlannerNote)) {
+          setNotesError("Existem notas inválidas na nuvem. As notas não foram carregadas.");
+          return;
+        }
+        const loadedNotes = stored as PlannerNote[];
+        syncedNotesRef.current = new Map(loadedNotes.map((note) => [note.id, JSON.stringify(note)]));
+        setNotes(loadedNotes);
+        setSelectedNoteId((current) => current && loadedNotes.some((note) => note.id === current)
+          ? current
+          : loadedNotes[0]?.id ?? null);
+        setNotesError("");
+        notesLoaded = true;
+        notesEmpty = snapshot.empty;
+        setNotesReady(true);
+        checkLegacyData();
+      },
+      (error) => {
+        console.error("Não foi possível carregar as notas do Firestore.", error);
+        setNotesError("Não foi possível acessar suas notas na nuvem. Confira a conexão e as regras do Firestore.");
+      },
+    );
+
+    return () => {
+      stopTasks();
+      stopNotes();
+    };
+  }, [user]);
+
+  useEffect(() => {
+    const firestore = db;
+    if (!user || !firestore || !storageReady || !syncedTasksRef.current) return;
+    const previous = syncedTasksRef.current;
+    const current = new Map(tasks.map((task) => [task.id, JSON.stringify(task)]));
+    const changes = tasks.filter((task) => previous.get(task.id) !== JSON.stringify(task));
+    const removed = [...previous.keys()].filter((id) => !current.has(id));
+    const writes = [
+      ...changes.map((task) => setDoc(doc(firestore, "users", user.uid, "activities", task.id), task)),
+      ...removed.map((id) => deleteDoc(doc(firestore, "users", user.uid, "activities", id))),
+    ];
+    if (!writes.length) return;
+    void Promise.all(writes).then(() => {
+      syncedTasksRef.current = current;
+      setStorageError("");
+    }).catch((error: unknown) => {
+      console.error("Não foi possível sincronizar as atividades com o Firestore.", error);
+      setStorageError("Não foi possível sincronizar as atividades. Suas alterações podem não ter sido salvas.");
+    });
+  }, [tasks, user, storageReady]);
+
+  useEffect(() => {
+    const firestore = db;
+    if (!user || !firestore || !notesReady || !syncedNotesRef.current) return;
+    const previous = syncedNotesRef.current;
+    const current = new Map(notes.map((note) => [note.id, JSON.stringify(note)]));
+    const changes = notes.filter((note) => previous.get(note.id) !== JSON.stringify(note));
+    const removed = [...previous.keys()].filter((id) => !current.has(id));
+    const writes = [
+      ...changes.map((note) => setDoc(doc(firestore, "users", user.uid, "notes", note.id), note)),
+      ...removed.map((id) => deleteDoc(doc(firestore, "users", user.uid, "notes", id))),
+    ];
+    if (!writes.length) return;
+    void Promise.all(writes).then(() => {
+      syncedNotesRef.current = current;
+      setNotesError("");
+    }).catch((error: unknown) => {
+      console.error("Não foi possível sincronizar as notas com o Firestore.", error);
+      setNotesError("Não foi possível sincronizar as notas. Suas alterações podem não ter sido salvas.");
+    });
+  }, [notes, user, notesReady]);
+
+  useEffect(() => {
+    try {
+      const storedAlarms = window.sessionStorage.getItem("meu-planner:fired-alarms:v1");
+      if (storedAlarms) {
+        const parsed: unknown = JSON.parse(storedAlarms);
+        if (Array.isArray(parsed) && parsed.every((key) => typeof key === "string")) {
+          firedAlarmsRef.current = new Set(parsed);
+        }
+      }
+    } catch (error) {
+      console.error("Não foi possível restaurar os alarmes já exibidos nesta sessão.", error);
+    }
+  }, []);
 
   useEffect(() => {
     if (!toast) return;
     const timeout = window.setTimeout(() => setToast(""), 2800);
     return () => window.clearTimeout(timeout);
   }, [toast]);
+
+  useEffect(() => {
+    function handleBeforeInstallPrompt(event: Event) {
+      event.preventDefault();
+      setInstallPrompt(event as InstallPromptEvent);
+    }
+    function handleAppInstalled() {
+      setInstallPrompt(null);
+      setIsInstalled(true);
+      setIsInstallHelpOpen(false);
+      setToast("Plan-ner foi instalado.");
+    }
+
+    window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+    window.addEventListener("appinstalled", handleAppInstalled);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+      window.removeEventListener("appinstalled", handleAppInstalled);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!storageReady) return;
+
+    function checkAlarms() {
+      const now = Date.now();
+      for (const task of tasks) {
+        if (!task.alarmEnabled || task.completed) continue;
+        const alarmTime = new Date(`${task.date}T${task.time}:00`).getTime();
+        const lateness = now - alarmTime;
+        const alarmKey = `${task.id}:${task.date}:${task.time}`;
+        if (lateness < 0 || lateness > 120_000 || firedAlarmsRef.current.has(alarmKey)) continue;
+
+        firedAlarmsRef.current.add(alarmKey);
+        try {
+          window.sessionStorage.setItem("meu-planner:fired-alarms:v1", JSON.stringify([...firedAlarmsRef.current]));
+        } catch (error) {
+          console.error("Não foi possível salvar o registro do alarme exibido.", error);
+        }
+        deliverAlarm(task);
+      }
+    }
+
+    checkAlarms();
+    const interval = window.setInterval(checkAlarms, 5_000);
+    return () => window.clearInterval(interval);
+  }, [tasks, storageReady, notificationPermission]);
 
   const today = localDateKey(new Date());
   const todayTasks = useMemo(() => tasks.filter((task) => task.date === today).sort((a, b) => a.time.localeCompare(b.time)), [tasks, today]);
@@ -339,6 +907,84 @@ export default function App() {
   const progress = tasks.length ? Math.round((completedTotal / tasks.length) * 100) : 0;
 
   const visibleTodayTasks = activeCategory === "Todas" ? todayTasks : todayTasks.filter((task) => task.category === activeCategory);
+  const selectedNote = notes.find((note) => note.id === selectedNoteId) ?? notes[0] ?? null;
+  const visibleNotes = useMemo(() => notes
+    .filter((note) => `${note.title} ${note.blocks.map((block) => block.text).join(" ")}`.toLocaleLowerCase("pt-BR").includes(noteSearch.toLocaleLowerCase("pt-BR")))
+    .sort((first, second) => second.updatedAt.localeCompare(first.updatedAt)), [notes, noteSearch]);
+
+  function createNewNote() {
+    const note = createNote();
+    setNotes((current) => [note, ...current]);
+    setSelectedNoteId(note.id);
+    setActiveView("Notas");
+    setNoteSearch("");
+  }
+
+  function updateSelectedNote(changes: Partial<Pick<PlannerNote, "title">>) {
+    if (!selectedNote) return;
+    setNotes((current) => current.map((note) => note.id === selectedNote.id
+      ? { ...note, ...changes, updatedAt: new Date().toISOString() }
+      : note));
+  }
+
+  function addNoteBlock(type: NoteBlockType, afterId?: string) {
+    if (!selectedNote) return "";
+    const block = createNoteBlock(type);
+    setNotes((current) => current.map((note) => {
+      if (note.id !== selectedNote.id) return note;
+      const blocks = [...note.blocks];
+      const position = afterId ? blocks.findIndex((item) => item.id === afterId) + 1 : blocks.length;
+      blocks.splice(position > 0 ? position : blocks.length, 0, block);
+      return { ...note, blocks, updatedAt: new Date().toISOString() };
+    }));
+    return block.id;
+  }
+
+  function updateNoteBlock(blockId: string, changes: Partial<Pick<NoteBlock, "text" | "checked">>) {
+    if (!selectedNote) return;
+    setNotes((current) => current.map((note) => note.id === selectedNote.id
+      ? {
+        ...note,
+        blocks: note.blocks.map((block) => block.id === blockId ? { ...block, ...changes } : block),
+        updatedAt: new Date().toISOString(),
+      }
+      : note));
+  }
+
+  function removeNoteBlock(blockId: string) {
+    if (!selectedNote) return;
+    setNotes((current) => current.map((note) => {
+      if (note.id !== selectedNote.id) return note;
+      const blocks = note.blocks.filter((block) => block.id !== blockId);
+      return {
+        ...note,
+        blocks: blocks.length ? blocks : [createNoteBlock()],
+        updatedAt: new Date().toISOString(),
+      };
+    }));
+  }
+
+  function moveNoteBlock(blockId: string, direction: -1 | 1) {
+    if (!selectedNote) return;
+    setNotes((current) => current.map((note) => {
+      if (note.id !== selectedNote.id) return note;
+      const blocks = [...note.blocks];
+      const index = blocks.findIndex((block) => block.id === blockId);
+      const target = index + direction;
+      if (index < 0 || target < 0 || target >= blocks.length) return note;
+      [blocks[index], blocks[target]] = [blocks[target], blocks[index]];
+      return { ...note, blocks, updatedAt: new Date().toISOString() };
+    }));
+  }
+
+  function deleteNote(note: PlannerNote) {
+    if (!window.confirm(`Excluir a nota "${note.title.trim() || "Sem título"}"? Esta ação não pode ser desfeita.`)) return;
+    const remaining = notes.filter((item) => item.id !== note.id);
+    setNotes(remaining);
+    const nextNote = remaining[0];
+    setSelectedNoteId(nextNote?.id ?? null);
+    setToast("Nota excluída.");
+  }
 
   function saveTask(task: PlannerTask) {
     setTasks((current) => {
@@ -362,14 +1008,207 @@ export default function App() {
     setToast(task.completed ? "Atividade reaberta." : "Atividade concluída!");
   }
 
+  async function prepareAlarmAudio() {
+    if (!("AudioContext" in window)) {
+      return false;
+    }
+
+    try {
+      if (!audioContextRef.current) audioContextRef.current = new AudioContext();
+      if (audioContextRef.current.state === "suspended") await audioContextRef.current.resume();
+      return audioContextRef.current.state === "running";
+    } catch (error) {
+      console.error("Não foi possível preparar o áudio do alarme.", error);
+      return false;
+    }
+  }
+
+  async function playAlarmSound() {
+    const audioReady = await prepareAlarmAudio();
+    const context = audioContextRef.current;
+    if (!audioReady || !context || context.state !== "running") return false;
+
+    [660, 880, 660].forEach((frequency, index) => {
+      const start = context.currentTime + index * 0.25;
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(frequency, start);
+      gain.gain.setValueAtTime(0.001, start);
+      gain.gain.exponentialRampToValueAtTime(0.14, start + 0.025);
+      gain.gain.exponentialRampToValueAtTime(0.001, start + 0.19);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start(start);
+      oscillator.stop(start + 0.2);
+    });
+    return true;
+  }
+
+  function deliverAlarm(task: PlannerTask) {
+    if (task.alarmSound) void playAlarmSound();
+    if (task.alarmVibration) requestVibration([250, 120, 250]);
+
+    setToast(`Hora de começar: ${task.title}`);
+    if (notificationPermission !== "granted") return;
+
+    const notificationOptions: NotificationOptions = {
+      body: `Sua atividade começa agora${task.time ? `, às ${task.time}` : ""}.`,
+      icon: `${import.meta.env.BASE_URL}icons/planner-192.png`,
+      tag: `meu-planner-${task.id}`,
+      silent: true,
+    };
+
+    const showNotification = async () => {
+      const registration = await navigator.serviceWorker?.getRegistration();
+      if (registration) {
+        await registration.showNotification(task.title, notificationOptions);
+      } else {
+        new Notification(task.title, notificationOptions);
+      }
+    };
+    void showNotification().catch((error: unknown) => {
+      console.error("Não foi possível exibir a notificação do alarme.", error);
+      setToast("O alarme tocou, mas não foi possível mostrar a notificação.");
+    });
+  }
+
+  async function testAlarm(sound: boolean, vibration: boolean) {
+    const soundStarted = sound ? await playAlarmSound() : false;
+    const vibrationStarted = vibration && requestVibration([180, 100, 180]);
+    if (!sound && !vibration) {
+      setToast("Ative som ou vibração para testar o alarme.");
+    } else if (!sound && !vibrationStarted) {
+      setToast("Este dispositivo não oferece vibração pelo navegador.");
+    } else if (sound && !soundStarted && vibrationStarted) {
+      setToast("A vibração funcionou, mas o som não pôde ser iniciado.");
+    } else if (sound && !soundStarted) {
+      setToast("O som não pôde ser iniciado. Verifique as permissões do dispositivo.");
+    } else if (vibration && !vibrationStarted && soundStarted) {
+      setToast("O som funcionou, mas este dispositivo não ofereceu vibração.");
+    } else {
+      setToast("Teste do alarme iniciado.");
+    }
+  }
+
+  async function requestNotifications() {
+    if (!("Notification" in window)) {
+      setNotificationPermission("unsupported");
+      setToast("Este navegador não oferece notificações.");
+      return;
+    }
+
+    try {
+      const permission = await Notification.requestPermission();
+      setNotificationPermission(permission);
+      setToast(permission === "granted"
+        ? "Notificações permitidas."
+        : "Permissão não concedida. O som e a vibração continuam disponíveis com o app aberto.");
+    } catch (error) {
+      console.error("Não foi possível solicitar permissão para notificações.", error);
+      setToast("Não foi possível solicitar permissão para notificações.");
+    }
+  }
+
   function openCreate() {
     setEditingTask(null);
     setIsFormOpen(true);
   }
 
+  async function installApp() {
+    if (!installPrompt) return;
+    try {
+      await installPrompt.prompt();
+      const choice = await installPrompt.userChoice;
+      if (choice.outcome === "accepted") setToast("Siga as instruções do navegador para concluir a instalação.");
+    } catch (error) {
+      console.error("Não foi possível iniciar a instalação do Plan-ner.", error);
+      setToast("Não foi possível iniciar. Tente pelo menu do navegador.");
+    } finally {
+      setInstallPrompt(null);
+      setIsInstallHelpOpen(false);
+    }
+  }
+
   function openEdit(task: PlannerTask) {
     setEditingTask(task);
     setIsFormOpen(true);
+  }
+
+  async function continueWithGoogle() {
+    if (!auth) return;
+    setSignInPending(true);
+    setAuthError("");
+    try {
+      await signInWithPopup(auth, new GoogleAuthProvider());
+    } catch (error) {
+      console.error("Não foi possível entrar com o Google.", error);
+      setAuthError("Não foi possível entrar com o Google. Confira sua conexão e tente novamente.");
+    } finally {
+      setSignInPending(false);
+    }
+  }
+
+  async function leaveAccount() {
+    if (!auth) return;
+    try {
+      await signOut(auth);
+      setAccountMenuOpen(false);
+    } catch (error) {
+      console.error("Não foi possível sair da conta.", error);
+      setStorageError("Não foi possível sair agora. Tente novamente.");
+    }
+  }
+
+  async function importLocalData() {
+    if (!user || !db) return;
+    let localTasks: PlannerTask[];
+    let localNotes: PlannerNote[];
+    try {
+      localTasks = readStoredTasks();
+      localNotes = readStoredNotes();
+    } catch (error) {
+      console.error("Não foi possível preparar a importação dos dados antigos.", error);
+      setStorageError("Os dados antigos deste dispositivo não puderam ser lidos.");
+      return;
+    }
+    if (!localTasks.length && !localNotes.length) {
+      setMigrationAvailable(false);
+      return;
+    }
+    if (!window.confirm(`Importar ${localTasks.length} atividade(s) e ${localNotes.length} nota(s) deste dispositivo para a conta ${user.email ?? "Google"}? Os dados locais serão apagados após a confirmação de envio.`)) return;
+
+    setMigrationPending(true);
+    try {
+      const entries = [
+        ...localTasks.map((item) => ({ collectionName: "activities", id: item.id, data: item })),
+        ...localNotes.map((item) => ({ collectionName: "notes", id: item.id, data: item })),
+      ];
+      for (let index = 0; index < entries.length; index += 400) {
+        const batch = writeBatch(db);
+        for (const entry of entries.slice(index, index + 400)) {
+          batch.set(doc(db, "users", user.uid, entry.collectionName, entry.id), entry.data);
+        }
+        await batch.commit();
+      }
+
+      window.localStorage.removeItem(STORAGE_KEY);
+      window.localStorage.removeItem(NOTES_STORAGE_KEY);
+      syncedTasksRef.current = new Map(localTasks.map((task) => [task.id, JSON.stringify(task)]));
+      syncedNotesRef.current = new Map(localNotes.map((note) => [note.id, JSON.stringify(note)]));
+      setTasks(localTasks);
+      setNotes(localNotes);
+      setSelectedNoteId(localNotes[0]?.id ?? null);
+      setMigrationAvailable(false);
+      setStorageError("");
+      setNotesError("");
+      setToast("Dados antigos importados para sua conta.");
+    } catch (error) {
+      console.error("Não foi possível importar os dados antigos para o Firestore.", error);
+      setStorageError("A importação não foi concluída. Os dados locais foram mantidos.");
+    } finally {
+      setMigrationPending(false);
+    }
   }
 
   const greetingDate = formatDate(new Date(), { weekday: "long", day: "numeric", month: "long" });
@@ -378,12 +1217,37 @@ export default function App() {
   weekStart.setDate(selectedDate.getDate() - ((selectedDate.getDay() + 6) % 7));
   const weekDays = Array.from({ length: 7 }, (_, index) => shiftDate(weekStart, index));
 
+  if (!authReady) {
+    return <main className="auth-shell"><div className="auth-card"><span className="loading-spinner" />Verificando sua conta...</div></main>;
+  }
+
+  if (!user) {
+    return (
+      <main className="auth-shell">
+        <section className="auth-card">
+          <span className="auth-brand-mark"><CalendarDays size={23} /></span>
+          <span className="eyebrow">SUA ROTINA, EM UM SÓ LUGAR</span>
+          <h1>Bem-vindo ao Plan-ner</h1>
+          <p className="auth-description">Entre com sua conta Google para acessar suas atividades e notas com privacidade, em todos os seus dispositivos.</p>
+          <div className="auth-security"><ShieldCheck size={18} /><span>Seus dados ficam separados por conta e protegidos pelas regras de acesso.</span></div>
+          {!firebaseConfigured && <p className="auth-setup-message" role="alert">O acesso ainda não foi configurado. Consulte o README para conectar o projeto Firebase.</p>}
+          {authError && <p className="auth-error" role="alert">{authError}</p>}
+          <button className="button button-primary google-signin" onClick={() => void continueWithGoogle()} disabled={!firebaseConfigured || signInPending}>
+            {signInPending ? <span className="loading-spinner" /> : <span className="google-letter" aria-hidden="true">G</span>}
+            {signInPending ? "Conectando..." : "Continuar com o Google"}
+          </button>
+          <p className="auth-footnote">Ao continuar, você usa sua conta Google para entrar. O Plan-ner não vê sua senha.</p>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <a className="brand" href="#" onClick={(event) => { event.preventDefault(); setActiveView("Dashboard"); }} aria-label="Meu Planner, ir para dashboard">
+        <a className="brand" href="#" onClick={(event) => { event.preventDefault(); setActiveView("Dashboard"); }} aria-label="Plan-ner, ir para dashboard">
           <span className="brand-mark"><CalendarDays size={21} strokeWidth={2.2} /></span>
-          <span className="brand-copy"><strong>Meu Planner</strong><small>Organize sua vida</small></span>
+          <span className="brand-copy"><strong>Plan-ner</strong><small>Organize sua vida</small></span>
         </a>
 
         <div className="sidebar-scroll">
@@ -420,9 +1284,12 @@ export default function App() {
             <div className="summary-foot"><span>{completedTotal} concluídas</span><span>{progress}%</span></div>
           </div>
           <div className="sidebar-profile">
-            <span className="avatar">MP</span>
-            <span className="profile-text"><strong>Meu espaço</strong><small>Plano pessoal</small></span>
-            <MoreHorizontal size={17} className="profile-more" />
+            {user.photoURL
+              ? <img className="avatar profile-photo" src={user.photoURL} alt="" />
+              : <span className="avatar">{(user.displayName || user.email || "P").split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</span>}
+            <span className="profile-text"><strong>{user.displayName || "Meu espaço"}</strong><small>{user.email || "Conta Google"}</small></span>
+            <button className="profile-more" onClick={() => setAccountMenuOpen((open) => !open)} aria-label="Opções da conta" aria-expanded={accountMenuOpen}><MoreHorizontal size={17} /></button>
+            {accountMenuOpen && <div className="account-menu"><button onClick={() => void leaveAccount()}><LogOut size={15} />Sair da conta</button></div>}
           </div>
         </div>
       </aside>
@@ -430,9 +1297,11 @@ export default function App() {
       <main className="main-content">
         <header className="mobile-header">
           <a className="brand" href="#" onClick={(event) => { event.preventDefault(); setActiveView("Dashboard"); }}>
-            <span className="brand-mark"><CalendarDays size={20} /></span><span className="brand-copy"><strong>Meu Planner</strong></span>
+            <span className="brand-mark"><CalendarDays size={20} /></span><span className="brand-copy"><strong>Plan-ner</strong></span>
           </a>
-          <button className="button button-primary mobile-add" onClick={openCreate}><Plus size={16} />Nova</button>
+          {!isInstalled && <button className="button button-install mobile-install" onClick={() => setIsInstallHelpOpen(true)}><Download size={15} />Instalar</button>}
+          <button className="icon-button mobile-account" onClick={() => void leaveAccount()} aria-label="Sair da conta"><LogOut size={16} /></button>
+          <button className="button button-primary mobile-add" onClick={activeView === "Notas" ? createNewNote : openCreate}><Plus size={16} />{activeView === "Notas" ? "Nota" : "Nova"}</button>
         </header>
 
         <div className="page-wrap">
@@ -440,21 +1309,30 @@ export default function App() {
             <div>
               <span className="eyebrow">{formatDate(new Date(), { weekday: "long", day: "numeric", month: "long" })}</span>
               <h1>{activeView}</h1>
-              <p>{activeView === "Dashboard" ? "Visão geral das suas atividades" : activeView === "Inteligente" ? "Ideias práticas para uma rotina mais leve" : activeView === "Semana" ? "Uma visão clara da sua semana" : "Organize suas atividades do dia"}</p>
+              <p>{activeView === "Dashboard" ? "Visão geral das suas atividades" : activeView === "Inteligente" ? "Ideias práticas para uma rotina mais leve" : activeView === "Semana" ? "Uma visão clara da sua semana" : activeView === "Notas" ? "Anote ideias, organize pensamentos e planeje seus projetos" : "Organize suas atividades do dia"}</p>
             </div>
-            <button className="button button-primary desktop-add" onClick={openCreate}><Plus size={18} strokeWidth={2.5} />Nova atividade</button>
+            <div className="page-header-actions">
+              {!isInstalled && <button className="button button-install desktop-install" onClick={() => setIsInstallHelpOpen(true)}><Download size={16} />Instalar app</button>}
+              {activeView === "Notas"
+                ? <button className="button button-primary desktop-add" onClick={createNewNote}><Plus size={18} strokeWidth={2.5} />Nova nota</button>
+                : <button className="button button-primary desktop-add" onClick={openCreate}><Plus size={18} strokeWidth={2.5} />Nova atividade</button>}
+            </div>
           </header>
 
+          {migrationAvailable && <div className="migration-banner">
+            <p>Encontramos atividades e notas antigas salvas neste dispositivo. Você pode importá-las para sua conta Google; os dados locais serão removidos após o envio.</p>
+            <button className="button button-primary" disabled={migrationPending} onClick={() => void importLocalData()}>{migrationPending ? "Importando..." : "Importar dados"}</button>
+          </div>}
           {storageError && <div role="alert" className="storage-alert"><span>{storageError}</span></div>}
 
           {!storageReady ? (
             <div className="loading-state"><span className="loading-spinner" />Carregando suas atividades...</div>
           ) : (
             <>
-              <div className="mobile-categories" aria-label="Filtrar atividades por categoria">
+              {activeView !== "Notas" && <div className="mobile-categories" aria-label="Filtrar atividades por categoria">
                 <button className={activeCategory === "Todas" ? "selected" : ""} onClick={() => setActiveCategory("Todas")}>Todas</button>
                 {categories.map((category) => <button key={category} className={activeCategory === category ? `selected ${categoryClass[category]}` : categoryClass[category]} onClick={() => setActiveCategory(category)}><i />{category}</button>)}
-              </div>
+              </div>}
               {activeView === "Dashboard" && (
                 <>
                   <section className="welcome-banner">
@@ -516,7 +1394,7 @@ export default function App() {
                       <div className="progress-detail"><span className="detail-dot pending-dot" />Pendentes <strong>{tasks.length - completedTotal}</strong></div>
                     </aside>
                   </section>
-                  <footer className="page-footer"><span>Feito para deixar sua rotina mais leve.</span><span className="footer-date"><span />Dados salvos neste dispositivo</span></footer>
+                  <footer className="page-footer"><span>Feito para deixar sua rotina mais leve.</span><span className="footer-date"><span />Dados na sua conta</span></footer>
                 </>
               )}
 
@@ -562,6 +1440,59 @@ export default function App() {
                   <div className="smart-tip"><span><Sparkles size={17} /></span><p><strong>Uma dica para você</strong><br />Experimente dividir atividades grandes em etapas menores. Fica mais fácil começar — e celebrar cada avanço.</p></div>
                 </section>
               )}
+
+              {activeView === "Notas" && (
+                <section className="notes-workspace">
+                  <aside className="notes-list-panel" aria-label="Lista de notas">
+                    <div className="notes-list-heading">
+                      <div><span className="eyebrow">ESPAÇO PESSOAL</span><h2>Minhas notas</h2></div>
+                      <button className="icon-button note-add-button" onClick={createNewNote} aria-label="Criar nova nota" title="Criar nova nota"><Plus size={17} /></button>
+                    </div>
+                    <label className="notes-search">
+                      <Search size={15} />
+                      <input value={noteSearch} onChange={(event) => setNoteSearch(event.target.value)} placeholder="Buscar nas notas..." aria-label="Buscar nas notas" />
+                      {noteSearch && <button onClick={() => setNoteSearch("")} aria-label="Limpar busca"><X size={13} /></button>}
+                    </label>
+                    <div className="notes-list">
+                      {!notesReady ? (
+                        <div className="notes-list-empty">Carregando notas...</div>
+                      ) : notesError ? (
+                        <div className="notes-list-error" role="alert">{notesError}</div>
+                      ) : visibleNotes.length ? visibleNotes.map((note) => (
+                        <button key={note.id} className={`note-list-item ${selectedNote?.id === note.id ? "selected" : ""}`} onClick={() => setSelectedNoteId(note.id)}>
+                          <FileText size={16} />
+                          <span><strong>{note.title.trim() || "Sem título"}</strong><small>{formatNoteTime(note.updatedAt)}</small></span>
+                          <ChevronRight size={14} className="note-list-chevron" />
+                        </button>
+                      )) : (
+                        <div className="notes-list-empty">{noteSearch ? "Nenhuma nota encontrada." : "Suas notas aparecerão aqui."}</div>
+                      )}
+                    </div>
+                    <div className="notes-list-footer"><FileText size={13} />{notes.length} {notes.length === 1 ? "nota salva" : "notas salvas"} na sua conta</div>
+                  </aside>
+                  {notesError ? (
+                    <div className="notes-empty-canvas" role="alert"><FileText size={25} /><h2>Notas indisponíveis</h2><p>{notesError}</p></div>
+                  ) : selectedNote ? (
+                    <NoteEditor
+                      key={selectedNote.id}
+                      note={selectedNote}
+                      onUpdate={updateSelectedNote}
+                      onAddBlock={addNoteBlock}
+                      onUpdateBlock={updateNoteBlock}
+                      onRemoveBlock={removeNoteBlock}
+                      onMoveBlock={moveNoteBlock}
+                      onDelete={() => deleteNote(selectedNote)}
+                    />
+                  ) : (
+                    <div className="notes-empty-canvas">
+                      <span className="notes-empty-icon"><FileText size={26} /></span>
+                      <h2>Um lugar para suas ideias.</h2>
+                      <p>Crie uma nota para começar a escrever seus pensamentos, listas e planos.</p>
+                      <button className="button button-primary" onClick={createNewNote}><Plus size={16} />Criar minha primeira nota</button>
+                    </div>
+                  )}
+                </section>
+              )}
             </>
           )}
         </div>
@@ -571,7 +1502,16 @@ export default function App() {
         {views.map(({ label, icon: Icon }) => <button key={label} onClick={() => setActiveView(label)} className={activeView === label ? "active" : ""} aria-label={label}><Icon size={19} /><span>{label === "Inteligente" ? "Smart" : label}</span></button>)}
       </nav>
 
-      {isFormOpen && <TaskForm task={editingTask} onClose={() => { setIsFormOpen(false); setEditingTask(null); }} onSave={saveTask} />}
+      {isFormOpen && <TaskForm
+        task={editingTask}
+        onClose={() => { setIsFormOpen(false); setEditingTask(null); }}
+        onSave={saveTask}
+        onAlarmEnable={() => { void prepareAlarmAudio(); }}
+        onTestAlarm={testAlarm}
+        onRequestNotifications={() => { void requestNotifications(); }}
+        notificationPermission={notificationPermission}
+      />}
+      {isInstallHelpOpen && <InstallHelpDialog canInstall={installPrompt !== null} onClose={() => setIsInstallHelpOpen(false)} onInstall={installApp} />}
       {toast && <div className="toast" role="status"><CheckCircle2 size={18} />{toast}</div>}
     </div>
   );

@@ -25,7 +25,7 @@ git init
 git add .
 
 # Primeiro commit
-git commit -m "🎉 Initial commit - Meu Planner"
+git commit -m "🎉 Initial commit - Plan-ner"
 
 # Renomeia a branch para main
 git branch -M main
