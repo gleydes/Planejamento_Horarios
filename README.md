@@ -17,6 +17,7 @@ Um planner completo e inteligente para organizar seus horários e otimizar sua p
 - **🔔 Alarmes por atividade** - Escolha som, vibração e notificações para cada lembrete
 - **📝 Bloco de notas** - Crie páginas com texto, títulos, listas, checklists e citações
 - **🏋️ Academia** - Planeje treinos por dia da semana com exercícios, séries, repetições, carga e descanso
+- **💰 Finanças** - Registre receitas e despesas, acompanhe vencimentos e configure limites mensais por categoria
 - **✍️ Créditos** - Rodapé com autoria de Gleydes Oliveira
 
 ## 🛠️ Tecnologias
@@ -72,7 +73,7 @@ Acesse: `http://localhost:3000`
 
 ## 📲 Instalar como aplicativo
 
-O Plan-ner pode ser instalado no computador, Android ou iPhone. Depois de abrir o site uma vez com internet, a interface também pode abrir sem conexão. Para entrar, ver, alterar ou sincronizar atividades e notas, é necessário estar conectado à internet.
+O Plan-ner pode ser instalado no computador, Android ou iPhone. Depois de abrir o site uma vez com internet, a interface também pode abrir sem conexão. Para entrar, ver, alterar ou sincronizar atividades, notas, treinos e dados financeiros, é necessário estar conectado à internet.
 
 1. Publique o site em um endereço seguro (HTTPS), como o GitHub Pages.
 2. Abra o site no navegador que você usa normalmente.
@@ -87,6 +88,10 @@ Abra **Notas** no menu para criar páginas e escrever. Use a barra **Adicionar b
 ### Treinos de academia
 
 Abra **Academia** no menu e crie um treino para cada dia da semana. Em cada treino, cadastre os exercícios, séries, repetições, carga e tempo de descanso. Os treinos são sincronizados na sua conta Google.
+
+### Organização financeira
+
+Abra **Finanças** para acompanhar receitas, despesas e saldo previsto por mês. Registre vencimentos, marque lançamentos como pagos ou recebidos e configure limites de gastos para cada categoria. Lançamentos mensais podem gerar o próximo lançamento recorrente após serem marcados como pagos ou recebidos. Os dados financeiros são privados e sincronizados na sua conta Google; o Plan-ner não se conecta a bancos.
 
 ### Alarmes e lembretes
 

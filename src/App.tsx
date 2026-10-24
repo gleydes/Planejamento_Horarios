@@ -28,6 +28,7 @@ import {
   Edit2,
   FileText,
   Filter,
+  Wallet,
   Heading1,
   Lightbulb,
   ListTodo,
@@ -55,7 +56,7 @@ import { auth, db, firebaseConfigured } from "./firebase";
 
 type Category = "Trabalho" | "Pessoal" | "Saúde" | "Estudo" | "Lazer" | "Outro";
 type Priority = "Alta" | "Média" | "Baixa";
-type View = "Dashboard" | "Dia" | "Semana" | "Inteligente" | "Academia" | "Notas";
+type View = "Dashboard" | "Dia" | "Semana" | "Inteligente" | "Academia" | "Finanças" | "Notas";
 type NoteBlockType = "paragraph" | "heading" | "bullet" | "checklist" | "quote" | "divider";
 
 interface NoteBlock {
@@ -109,6 +110,28 @@ interface GymPlan {
   exercises: GymExercise[];
 }
 
+type FinanceType = "Receita" | "Despesa";
+type FinanceRecurrence = "Nenhuma" | "Mensal";
+
+interface FinanceTransaction {
+  id: string;
+  title: string;
+  type: FinanceType;
+  amount: number;
+  category: string;
+  date: string;
+  dueDate: string;
+  paid: boolean;
+  recurrence: FinanceRecurrence;
+}
+
+interface FinanceBudget {
+  id: string;
+  month: string;
+  category: string;
+  amount: number;
+}
+
 type NotificationPermissionState = NotificationPermission | "unsupported";
 
 const STORAGE_KEY = "meu-planner:activities:v1";
@@ -120,9 +143,14 @@ const views: { label: View; icon: typeof CalendarDays }[] = [
   { label: "Semana", icon: CalendarDays },
   { label: "Inteligente", icon: Sparkles },
   { label: "Academia", icon: Dumbbell },
+  { label: "Finanças", icon: Wallet },
   { label: "Notas", icon: FileText },
 ];
 const dayLabels = ["Domingo", "Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado"];
+const financeCategories: Record<FinanceType, string[]> = {
+  Receita: ["Salário", "Freelance", "Investimentos", "Outros"],
+  Despesa: ["Moradia", "Alimentação", "Transporte", "Saúde", "Educação", "Lazer", "Contas", "Outros"],
+};
 
 const categoryClass: Record<Category, string> = {
   Trabalho: "work",
@@ -260,6 +288,70 @@ function isGymPlan(value: unknown): value is GymPlan {
     && plan.exercises.every(isGymExercise);
 }
 
+function isFinanceTransaction(value: unknown): value is FinanceTransaction {
+  if (typeof value !== "object" || value === null) return false;
+  const transaction = value as Record<string, unknown>;
+  if (transaction.type !== "Receita" && transaction.type !== "Despesa") return false;
+  return typeof transaction.id === "string"
+    && typeof transaction.title === "string"
+    && typeof transaction.amount === "number"
+    && Number.isFinite(transaction.amount)
+    && transaction.amount > 0
+    && typeof transaction.category === "string"
+    && financeCategories[transaction.type].includes(transaction.category)
+    && isDateKey(transaction.date)
+    && (transaction.dueDate === "" || isDateKey(transaction.dueDate))
+    && typeof transaction.paid === "boolean"
+    && ["Nenhuma", "Mensal"].includes(String(transaction.recurrence));
+}
+
+function isDateKey(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+}
+
+function isFinanceBudget(value: unknown): value is FinanceBudget {
+  if (typeof value !== "object" || value === null) return false;
+  const budget = value as Record<string, unknown>;
+  return typeof budget.id === "string"
+    && typeof budget.month === "string"
+    && /^\d{4}-(0[1-9]|1[0-2])$/.test(budget.month)
+    && typeof budget.category === "string"
+    && financeCategories.Despesa.includes(budget.category)
+    && typeof budget.amount === "number"
+    && Number.isFinite(budget.amount)
+    && budget.amount > 0;
+}
+
+function formatCurrency(amount: number) {
+  return new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(amount);
+}
+
+function monthKey(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function shiftMonth(month: string, amount: number) {
+  const [year, monthIndex] = month.split("-").map(Number);
+  const shifted = new Date(year, monthIndex - 1 + amount, 1);
+  return monthKey(shifted);
+}
+
+function formatMonth(month: string) {
+  const [year, monthIndex] = month.split("-").map(Number);
+  return new Intl.DateTimeFormat("pt-BR", { month: "long", year: "numeric" }).format(new Date(year, monthIndex - 1, 1));
+}
+
+function nextMonthlyDate(date: string) {
+  const [year, month, day] = date.split("-").map(Number);
+  const nextMonth = new Date(year, month, 1);
+  const lastDay = new Date(nextMonth.getFullYear(), nextMonth.getMonth() + 1, 0).getDate();
+  const nextDay = Math.min(day, lastDay);
+  return `${nextMonth.getFullYear()}-${String(nextMonth.getMonth() + 1).padStart(2, "0")}-${String(nextDay).padStart(2, "0")}`;
+}
+
 function formatDuration(minutes: number) {
   const hours = Math.floor(minutes / 60);
   const remainder = minutes % 60;
@@ -330,6 +422,114 @@ function GymPlanModal({ plan, onClose, onSave }: {
         </form>
       </section>
     </div>
+  );
+}
+
+function FinanceTransactionModal({ transaction, onClose, onSave }: {
+  transaction: FinanceTransaction | null;
+  onClose: () => void;
+  onSave: (transaction: FinanceTransaction) => void;
+}) {
+  const [title, setTitle] = useState(transaction?.title ?? "");
+  const [type, setType] = useState<FinanceType>(transaction?.type ?? "Despesa");
+  const [amount, setAmount] = useState(transaction ? String(transaction.amount) : "");
+  const [category, setCategory] = useState(transaction?.category ?? financeCategories.Despesa[0]);
+  const [date, setDate] = useState(transaction?.date ?? localDateKey(new Date()));
+  const [dueDate, setDueDate] = useState(transaction?.dueDate ?? "");
+  const [recurrence, setRecurrence] = useState<FinanceRecurrence>(transaction?.recurrence ?? "Nenhuma");
+  const [error, setError] = useState("");
+
+  function changeType(nextType: FinanceType) {
+    setType(nextType);
+    if (!financeCategories[nextType].includes(category)) setCategory(financeCategories[nextType][0]);
+  }
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const parsedAmount = Number(amount.replace(",", "."));
+    if (!title.trim()) {
+      setError("Informe uma descrição para o lançamento.");
+      return;
+    }
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+      setError("Informe um valor maior que zero.");
+      return;
+    }
+    onSave({
+      id: transaction?.id ?? createId(),
+      title: title.trim(),
+      type,
+      amount: Math.round(parsedAmount * 100) / 100,
+      category,
+      date,
+      dueDate,
+      paid: transaction?.paid ?? false,
+      recurrence,
+    });
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="activity-modal finance-modal" role="dialog" aria-modal="true" aria-labelledby="finance-modal-title">
+        <div className="modal-heading">
+          <div><span className="eyebrow">ORGANIZAÇÃO FINANCEIRA</span><h2 id="finance-modal-title">{transaction ? "Editar lançamento" : "Novo lançamento"}</h2></div>
+          <button type="button" className="icon-button modal-close" onClick={onClose} aria-label="Fechar"><X size={19} /></button>
+        </div>
+        <form className="activity-form" onSubmit={submit}>
+          <div className="form-row">
+            <label className="form-field"><span>Tipo</span><select value={type} onChange={(event) => changeType(event.target.value as FinanceType)}><option>Despesa</option><option>Receita</option></select></label>
+            <label className="form-field"><span>Valor (R$)</span><input type="number" min="0.01" step="0.01" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="0,00" /></label>
+          </div>
+          <label className="form-field"><span>Descrição</span><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Ex.: Conta de energia" autoFocus /></label>
+          <label className="form-field"><span>Categoria</span><select value={category} onChange={(event) => setCategory(event.target.value)}>{financeCategories[type].map((item) => <option key={item}>{item}</option>)}</select></label>
+          <div className="form-row">
+            <label className="form-field"><span>Data</span><input type="date" value={date} onChange={(event) => setDate(event.target.value)} required /></label>
+            <label className="form-field"><span>Vencimento (opcional)</span><input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} /></label>
+          </div>
+          <label className="form-field"><span>Recorrência</span><select value={recurrence} onChange={(event) => setRecurrence(event.target.value as FinanceRecurrence)}><option>Nenhuma</option><option>Mensal</option></select></label>
+          {error && <p className="form-error" role="alert">{error}</p>}
+          <div className="form-actions"><button type="button" className="button button-quiet" onClick={onClose}>Cancelar</button><button type="submit" className="button button-primary"><Check size={16} />{transaction ? "Salvar alterações" : "Adicionar lançamento"}</button></div>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function FinanceBudgetPanel({ month, budgets, spending, onSave }: {
+  month: string;
+  budgets: FinanceBudget[];
+  spending: Record<string, number>;
+  onSave: (category: string, amount: number) => void;
+}) {
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const budgetKey = budgets.map((budget) => `${budget.category}:${budget.amount}`).join("|");
+
+  useEffect(() => {
+    setDrafts(Object.fromEntries(financeCategories.Despesa.map((category) => [
+      category,
+      String(budgets.find((budget) => budget.category === category)?.amount ?? ""),
+    ])));
+  }, [month, budgetKey]);
+
+  return (
+    <section className="panel finance-budget-panel">
+      <div className="finance-section-heading"><div><span className="eyebrow">CONTROLE DO MÊS</span><h2>Limites por categoria</h2></div></div>
+      <div className="finance-budget-list">{financeCategories.Despesa.map((category) => {
+        const budget = budgets.find((item) => item.category === category);
+        const spent = spending[category] ?? 0;
+        const limit = budget?.amount ?? 0;
+        const percentage = limit ? Math.min(100, Math.round((spent / limit) * 100)) : 0;
+        return <div className="finance-budget-row" key={category}>
+          <div className="finance-budget-label"><strong>{category}</strong><span>{limit ? `${formatCurrency(spent)} de ${formatCurrency(limit)}` : `${formatCurrency(spent)} gastos`}</span></div>
+          <div className={`finance-budget-progress ${limit && spent > limit ? "over-budget" : ""}`}><span style={{ width: `${percentage}%` }} /></div>
+          <label className="finance-budget-input"><span>Limite R$</span><input aria-label={`Limite mensal para ${category}`} type="number" min="0" step="0.01" value={drafts[category] ?? ""} onChange={(event) => setDrafts((current) => ({ ...current, [category]: event.target.value }))} onBlur={() => {
+            const value = Number((drafts[category] ?? "").replace(",", "."));
+            if (Number.isFinite(value) && value >= 0 && value !== limit) onSave(category, Math.round(value * 100) / 100);
+          }} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} placeholder="Sem limite" /></label>
+        </div>;
+      })}</div>
+      <p className="finance-budget-hint">Os limites são salvos ao sair do campo. Use 0 para remover um limite.</p>
+    </section>
   );
 }
 
@@ -762,6 +962,8 @@ export default function App() {
   const [tasks, setTasks] = useState<PlannerTask[]>([]);
   const [notes, setNotes] = useState<PlannerNote[]>([]);
   const [gymPlans, setGymPlans] = useState<GymPlan[]>([]);
+  const [financeTransactions, setFinanceTransactions] = useState<FinanceTransaction[]>([]);
+  const [financeBudgets, setFinanceBudgets] = useState<FinanceBudget[]>([]);
   const [activeView, setActiveView] = useState<View>("Dashboard");
   const [activeCategory, setActiveCategory] = useState<Category | "Todas">("Todas");
   const [selectedDate, setSelectedDate] = useState(new Date());
@@ -781,6 +983,11 @@ export default function App() {
   const [gymError, setGymError] = useState("");
   const [editingGymPlan, setEditingGymPlan] = useState<GymPlan | null>(null);
   const [isGymFormOpen, setIsGymFormOpen] = useState(false);
+  const [financeReady, setFinanceReady] = useState(false);
+  const [financeError, setFinanceError] = useState("");
+  const [financeMonth, setFinanceMonth] = useState(monthKey(new Date()));
+  const [editingFinanceTransaction, setEditingFinanceTransaction] = useState<FinanceTransaction | null>(null);
+  const [isFinanceFormOpen, setIsFinanceFormOpen] = useState(false);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [noteSearch, setNoteSearch] = useState("");
   const [storageError, setStorageError] = useState("");
@@ -792,6 +999,8 @@ export default function App() {
   const syncedTasksRef = useRef<Map<string, string> | null>(null);
   const syncedNotesRef = useRef<Map<string, string> | null>(null);
   const syncedGymPlansRef = useRef<Map<string, string> | null>(null);
+  const syncedFinanceTransactionsRef = useRef<Map<string, string> | null>(null);
+  const syncedFinanceBudgetsRef = useRef<Map<string, string> | null>(null);
 
   useEffect(() => {
     if (!firebaseConfigured || !auth) {
@@ -805,16 +1014,22 @@ export default function App() {
       setTasks([]);
       setNotes([]);
       setGymPlans([]);
+      setFinanceTransactions([]);
+      setFinanceBudgets([]);
       setStorageReady(false);
       setNotesReady(false);
       setGymReady(false);
+      setFinanceReady(false);
       setStorageError("");
       setNotesError("");
       setGymError("");
+      setFinanceError("");
       setMigrationAvailable(false);
       syncedTasksRef.current = null;
       syncedNotesRef.current = null;
       syncedGymPlansRef.current = null;
+      syncedFinanceTransactionsRef.current = null;
+      syncedFinanceBudgetsRef.current = null;
     }, (error) => {
       console.error("Não foi possível verificar a sessão do Plan-ner.", error);
       setAuthError("Não foi possível verificar seu acesso. Recarregue a página e tente novamente.");
@@ -828,6 +1043,7 @@ export default function App() {
     setStorageReady(false);
     setNotesReady(false);
     setGymReady(false);
+    setFinanceReady(false);
     let tasksLoaded = false;
     let notesLoaded = false;
     let tasksEmpty = false;
@@ -924,11 +1140,66 @@ export default function App() {
         setGymError("Não foi possível acessar seus treinos na nuvem. Confira a conexão e as regras do Firestore.");
       },
     );
+    let transactionsLoaded = false;
+    let budgetsLoaded = false;
+    const updateFinanceReady = () => setFinanceReady(transactionsLoaded && budgetsLoaded);
+    const stopFinanceTransactions = onSnapshot(
+      collection(db, "users", user.uid, "financeTransactions"),
+      { includeMetadataChanges: true },
+      (snapshot) => {
+        if (snapshot.metadata.fromCache) {
+          setFinanceError("Conecte-se à internet para carregar e sincronizar seus dados financeiros.");
+          return;
+        }
+        const stored = snapshot.docs.map((item) => item.data());
+        if (!stored.every(isFinanceTransaction)) {
+          setFinanceError("Existem lançamentos financeiros inválidos na nuvem. Os dados não foram carregados.");
+          return;
+        }
+        const loaded = stored as FinanceTransaction[];
+        syncedFinanceTransactionsRef.current = new Map(loaded.map((item) => [item.id, JSON.stringify(item)]));
+        setFinanceTransactions(loaded);
+        transactionsLoaded = true;
+        setFinanceError("");
+        updateFinanceReady();
+      },
+      (error) => {
+        console.error("Não foi possível carregar os lançamentos financeiros do Firestore.", error);
+        setFinanceError("Não foi possível acessar seus dados financeiros na nuvem. Confira a conexão e as regras do Firestore.");
+      },
+    );
+    const stopFinanceBudgets = onSnapshot(
+      collection(db, "users", user.uid, "financeBudgets"),
+      { includeMetadataChanges: true },
+      (snapshot) => {
+        if (snapshot.metadata.fromCache) {
+          setFinanceError("Conecte-se à internet para carregar e sincronizar seus limites financeiros.");
+          return;
+        }
+        const stored = snapshot.docs.map((item) => item.data());
+        if (!stored.every(isFinanceBudget)) {
+          setFinanceError("Existem limites financeiros inválidos na nuvem. Os dados não foram carregados.");
+          return;
+        }
+        const loaded = stored as FinanceBudget[];
+        syncedFinanceBudgetsRef.current = new Map(loaded.map((item) => [item.id, JSON.stringify(item)]));
+        setFinanceBudgets(loaded);
+        budgetsLoaded = true;
+        setFinanceError("");
+        updateFinanceReady();
+      },
+      (error) => {
+        console.error("Não foi possível carregar os limites financeiros do Firestore.", error);
+        setFinanceError("Não foi possível acessar seus limites financeiros na nuvem. Confira a conexão e as regras do Firestore.");
+      },
+    );
 
     return () => {
       stopTasks();
       stopNotes();
       stopGymPlans();
+      stopFinanceTransactions();
+      stopFinanceBudgets();
     };
   }, [user]);
 
@@ -994,6 +1265,48 @@ export default function App() {
       setGymError("Não foi possível sincronizar os treinos. Suas alterações podem não ter sido salvas.");
     });
   }, [gymPlans, user, gymReady]);
+
+  useEffect(() => {
+    const firestore = db;
+    if (!user || !firestore || !financeReady || !syncedFinanceTransactionsRef.current) return;
+    const previous = syncedFinanceTransactionsRef.current;
+    const current = new Map(financeTransactions.map((item) => [item.id, JSON.stringify(item)]));
+    const changes = financeTransactions.filter((item) => previous.get(item.id) !== JSON.stringify(item));
+    const removed = [...previous.keys()].filter((id) => !current.has(id));
+    const writes = [
+      ...changes.map((item) => setDoc(doc(firestore, "users", user.uid, "financeTransactions", item.id), item)),
+      ...removed.map((id) => deleteDoc(doc(firestore, "users", user.uid, "financeTransactions", id))),
+    ];
+    if (!writes.length) return;
+    void Promise.all(writes).then(() => {
+      syncedFinanceTransactionsRef.current = current;
+      setFinanceError("");
+    }).catch((error: unknown) => {
+      console.error("Não foi possível sincronizar os lançamentos financeiros com o Firestore.", error);
+      setFinanceError("Não foi possível sincronizar seus lançamentos. Suas alterações podem não ter sido salvas.");
+    });
+  }, [financeTransactions, user, financeReady]);
+
+  useEffect(() => {
+    const firestore = db;
+    if (!user || !firestore || !financeReady || !syncedFinanceBudgetsRef.current) return;
+    const previous = syncedFinanceBudgetsRef.current;
+    const current = new Map(financeBudgets.map((item) => [item.id, JSON.stringify(item)]));
+    const changes = financeBudgets.filter((item) => previous.get(item.id) !== JSON.stringify(item));
+    const removed = [...previous.keys()].filter((id) => !current.has(id));
+    const writes = [
+      ...changes.map((item) => setDoc(doc(firestore, "users", user.uid, "financeBudgets", item.id), item)),
+      ...removed.map((id) => deleteDoc(doc(firestore, "users", user.uid, "financeBudgets", id))),
+    ];
+    if (!writes.length) return;
+    void Promise.all(writes).then(() => {
+      syncedFinanceBudgetsRef.current = current;
+      setFinanceError("");
+    }).catch((error: unknown) => {
+      console.error("Não foi possível sincronizar os limites financeiros com o Firestore.", error);
+      setFinanceError("Não foi possível sincronizar seus limites. Suas alterações podem não ter sido salvas.");
+    });
+  }, [financeBudgets, user, financeReady]);
 
   useEffect(() => {
     try {
@@ -1074,6 +1387,19 @@ export default function App() {
   const progress = tasks.length ? Math.round((completedTotal / tasks.length) * 100) : 0;
 
   const visibleTodayTasks = activeCategory === "Todas" ? todayTasks : todayTasks.filter((task) => task.category === activeCategory);
+  const monthlyFinanceTransactions = useMemo(() => financeTransactions
+    .filter((transaction) => transaction.date.slice(0, 7) === financeMonth)
+    .sort((first, second) => (first.dueDate || first.date).localeCompare(second.dueDate || second.date)), [financeTransactions, financeMonth]);
+  const monthBudgets = financeBudgets.filter((budget) => budget.month === financeMonth);
+  const monthIncome = monthlyFinanceTransactions.filter((transaction) => transaction.type === "Receita").reduce((total, transaction) => total + transaction.amount, 0);
+  const monthExpenses = monthlyFinanceTransactions.filter((transaction) => transaction.type === "Despesa").reduce((total, transaction) => total + transaction.amount, 0);
+  const monthPaidIncome = monthlyFinanceTransactions.filter((transaction) => transaction.type === "Receita" && transaction.paid).reduce((total, transaction) => total + transaction.amount, 0);
+  const monthPaidExpenses = monthlyFinanceTransactions.filter((transaction) => transaction.type === "Despesa" && transaction.paid).reduce((total, transaction) => total + transaction.amount, 0);
+  const monthDueTransactions = monthlyFinanceTransactions.filter((transaction) => transaction.dueDate && !transaction.paid);
+  const categorySpending = monthlyFinanceTransactions.reduce<Record<string, number>>((totals, transaction) => {
+    if (transaction.type === "Despesa") totals[transaction.category] = (totals[transaction.category] ?? 0) + transaction.amount;
+    return totals;
+  }, {});
   const selectedNote = notes.find((note) => note.id === selectedNoteId) ?? notes[0] ?? null;
   const visibleNotes = useMemo(() => notes
     .filter((note) => `${note.title} ${note.blocks.map((block) => block.text).join(" ")}`.toLocaleLowerCase("pt-BR").includes(noteSearch.toLocaleLowerCase("pt-BR")))
@@ -1297,6 +1623,50 @@ export default function App() {
     setToast(editingGymPlan ? "Treino atualizado com sucesso." : "Treino criado com sucesso.");
   }
 
+  function openFinanceTransaction(transaction: FinanceTransaction | null = null) {
+    setEditingFinanceTransaction(transaction);
+    setIsFinanceFormOpen(true);
+  }
+
+  function saveFinanceTransaction(transaction: FinanceTransaction) {
+    setFinanceTransactions((current) => {
+      const exists = current.some((item) => item.id === transaction.id);
+      return exists ? current.map((item) => item.id === transaction.id ? transaction : item) : [...current, transaction];
+    });
+    setIsFinanceFormOpen(false);
+    setEditingFinanceTransaction(null);
+    setToast(editingFinanceTransaction ? "Lançamento atualizado." : "Lançamento adicionado.");
+  }
+
+  function removeFinanceTransaction(transaction: FinanceTransaction) {
+    if (!window.confirm(`Excluir "${transaction.title}"? Esta ação não pode ser desfeita.`)) return;
+    setFinanceTransactions((current) => current.filter((item) => item.id !== transaction.id));
+    setToast("Lançamento excluído.");
+  }
+
+  function toggleFinancePaid(transaction: FinanceTransaction) {
+    setFinanceTransactions((current) => {
+      const updated = { ...transaction, paid: !transaction.paid };
+      const next = current.map((item) => item.id === transaction.id ? updated : item);
+      if (transaction.paid || transaction.recurrence !== "Mensal") return next;
+      const nextDate = nextMonthlyDate(transaction.date);
+      const nextId = `recurring-${transaction.id}-${nextDate}`;
+      if (next.some((item) => item.id === nextId)) return next;
+      const nextDueDate = transaction.dueDate ? nextMonthlyDate(transaction.dueDate) : "";
+      return [...next, { ...transaction, id: nextId, date: nextDate, dueDate: nextDueDate, paid: false }];
+    });
+    setToast(transaction.paid ? "Lançamento reaberto." : "Lançamento marcado como pago/recebido.");
+  }
+
+  function saveFinanceBudget(category: string, amount: number) {
+    const id = `budget-${financeMonth}-${category.toLowerCase()}`;
+    setFinanceBudgets((current) => amount === 0
+      ? current.filter((budget) => budget.id !== id)
+      : current.some((budget) => budget.id === id)
+        ? current.map((budget) => budget.id === id ? { ...budget, amount } : budget)
+        : [...current, { id, month: financeMonth, category, amount }]);
+  }
+
   function removeGymPlan(plan: GymPlan) {
     if (!window.confirm(`Excluir o treino "${plan.name}"? Esta ação não pode ser desfeita.`)) return;
     setGymPlans((current) => current.filter((item) => item.id !== plan.id));
@@ -1416,7 +1786,7 @@ export default function App() {
           <span className="auth-brand-mark"><CalendarDays size={23} /></span>
           <span className="eyebrow">SUA ROTINA, EM UM SÓ LUGAR</span>
           <h1>Bem-vindo ao Plan-ner</h1>
-          <p className="auth-description">Entre com sua conta Google para acessar suas atividades e notas com privacidade, em todos os seus dispositivos.</p>
+          <p className="auth-description">Entre com sua conta Google para acessar suas atividades, notas, treinos e dados financeiros com privacidade, em todos os seus dispositivos.</p>
           <div className="auth-security"><ShieldCheck size={18} /><span>Seus dados ficam separados por conta e protegidos pelas regras de acesso.</span></div>
           {!firebaseConfigured && <p className="auth-setup-message" role="alert">O acesso ainda não foi configurado. Consulte o README para conectar o projeto Firebase.</p>}
           {authError && <p className="auth-error" role="alert">{authError}</p>}
@@ -1489,7 +1859,7 @@ export default function App() {
           </a>
           {!isInstalled && <button className="button button-install mobile-install" onClick={() => setIsInstallHelpOpen(true)}><Download size={15} />Instalar</button>}
           <button className="icon-button mobile-account" onClick={() => void leaveAccount()} aria-label="Sair da conta"><LogOut size={16} /></button>
-          <button className="button button-primary mobile-add" onClick={activeView === "Notas" ? createNewNote : activeView === "Academia" ? () => openGymPlan() : openCreate}><Plus size={16} />{activeView === "Notas" ? "Nota" : activeView === "Academia" ? "Treino" : "Nova"}</button>
+          <button className="button button-primary mobile-add" onClick={activeView === "Notas" ? createNewNote : activeView === "Academia" ? () => openGymPlan() : activeView === "Finanças" ? () => openFinanceTransaction() : openCreate}><Plus size={16} />{activeView === "Notas" ? "Nota" : activeView === "Academia" ? "Treino" : activeView === "Finanças" ? "Lançamento" : "Nova"}</button>
         </header>
 
         <div className="page-wrap">
@@ -1497,11 +1867,13 @@ export default function App() {
             <div>
               <span className="eyebrow">{formatDate(new Date(), { weekday: "long", day: "numeric", month: "long" })}</span>
               <h1>{activeView}</h1>
-              <p>{activeView === "Dashboard" ? "Visão geral das suas atividades" : activeView === "Inteligente" ? "Ideias práticas para uma rotina mais leve" : activeView === "Semana" ? "Uma visão clara da sua semana" : activeView === "Academia" ? "Organize seus treinos e acompanhe seus exercícios" : activeView === "Notas" ? "Anote ideias, organize pensamentos e planeje seus projetos" : "Organize suas atividades do dia"}</p>
+              <p>{activeView === "Dashboard" ? "Visão geral das suas atividades" : activeView === "Inteligente" ? "Ideias práticas para uma rotina mais leve" : activeView === "Semana" ? "Uma visão clara da sua semana" : activeView === "Academia" ? "Organize seus treinos e acompanhe seus exercícios" : activeView === "Finanças" ? "Acompanhe receitas, despesas e vencimentos" : activeView === "Notas" ? "Anote ideias, organize pensamentos e planeje seus projetos" : "Organize suas atividades do dia"}</p>
             </div>
             <div className="page-header-actions">
               {!isInstalled && <button className="button button-install desktop-install" onClick={() => setIsInstallHelpOpen(true)}><Download size={16} />Instalar app</button>}
-              {activeView === "Academia"
+              {activeView === "Finanças"
+                ? <button className="button button-primary desktop-add" onClick={() => openFinanceTransaction()}><Plus size={18} strokeWidth={2.5} />Novo lançamento</button>
+                : activeView === "Academia"
                 ? <button className="button button-primary desktop-add" onClick={() => openGymPlan()}><Plus size={18} strokeWidth={2.5} />Novo treino</button>
                 : activeView === "Notas"
                 ? <button className="button button-primary desktop-add" onClick={createNewNote}><Plus size={18} strokeWidth={2.5} />Nova nota</button>
@@ -1519,7 +1891,7 @@ export default function App() {
             <div className="loading-state"><span className="loading-spinner" />Carregando suas atividades...</div>
           ) : (
             <>
-              {activeView !== "Notas" && activeView !== "Academia" && <div className="mobile-categories" aria-label="Filtrar atividades por categoria">
+              {activeView !== "Notas" && activeView !== "Academia" && activeView !== "Finanças" && <div className="mobile-categories" aria-label="Filtrar atividades por categoria">
                 <button className={activeCategory === "Todas" ? "selected" : ""} onClick={() => setActiveCategory("Todas")}>Todas</button>
                 {categories.map((category) => <button key={category} className={activeCategory === category ? `selected ${categoryClass[category]}` : categoryClass[category]} onClick={() => setActiveCategory(category)}><i />{category}</button>)}
               </div>}
@@ -1673,6 +2045,50 @@ export default function App() {
                 </section>
               )}
 
+              {activeView === "Finanças" && (
+                <section className="finance-view">
+                  <div className="finance-month-toolbar">
+                    <button className="icon-button" onClick={() => setFinanceMonth((month) => shiftMonth(month, -1))} aria-label="Mês anterior"><ChevronLeft size={19} /></button>
+                    <h2>{formatMonth(financeMonth)}</h2>
+                    <button className="icon-button" onClick={() => setFinanceMonth((month) => shiftMonth(month, 1))} aria-label="Próximo mês"><ChevronRight size={19} /></button>
+                    {financeMonth !== monthKey(new Date()) && <button className="button button-quiet finance-current-month" onClick={() => setFinanceMonth(monthKey(new Date()))}>Este mês</button>}
+                  </div>
+                  {financeError && <div className="storage-alert" role="alert">{financeError}</div>}
+                  {!financeReady ? <div className="loading-state"><span className="loading-spinner" />Carregando suas finanças...</div> : (
+                    <>
+                      <div className="finance-summary-grid">
+                        <article className="panel finance-summary-card income-card"><span>Receitas previstas</span><strong>{formatCurrency(monthIncome)}</strong><small>{formatCurrency(monthPaidIncome)} recebidas</small></article>
+                        <article className="panel finance-summary-card expense-card"><span>Despesas previstas</span><strong>{formatCurrency(monthExpenses)}</strong><small>{formatCurrency(monthPaidExpenses)} pagas</small></article>
+                        <article className={`panel finance-summary-card balance-card ${monthIncome - monthExpenses < 0 ? "negative" : ""}`}><span>Saldo previsto</span><strong>{formatCurrency(monthIncome - monthExpenses)}</strong><small>Saldo realizado: {formatCurrency(monthPaidIncome - monthPaidExpenses)}</small></article>
+                        <article className="panel finance-summary-card due-card"><span>Contas em aberto</span><strong>{monthDueTransactions.length}</strong><small>{monthDueTransactions.filter((item) => item.dueDate < today).length} vencida(s)</small></article>
+                      </div>
+                      <div className="finance-layout">
+                        <section className="panel finance-transactions">
+                          <div className="finance-section-heading">
+                            <div><span className="eyebrow">MOVIMENTAÇÕES</span><h2>Lançamentos do mês</h2></div>
+                            <button className="button button-primary" onClick={() => openFinanceTransaction()}><Plus size={15} />Adicionar</button>
+                          </div>
+                          {monthlyFinanceTransactions.length ? <div className="finance-transaction-list">{monthlyFinanceTransactions.map((transaction) => (
+                            <article className="finance-transaction-row" key={transaction.id}>
+                              <span className={`finance-transaction-icon ${transaction.type === "Receita" ? "income" : "expense"}`}>{transaction.type === "Receita" ? <ArrowDownRight size={17} /> : <ArrowUpRight size={17} />}</span>
+                              <div className="finance-transaction-copy"><strong>{transaction.title}</strong><span>{transaction.category} · {formatDate(new Date(`${transaction.date}T12:00:00`), { day: "numeric", month: "short" })}{transaction.recurrence === "Mensal" && <span className="finance-recurring">Mensal</span>}</span>{transaction.dueDate && <small>Vencimento: {formatDate(new Date(`${transaction.dueDate}T12:00:00`), { day: "numeric", month: "short" })}</small>}</div>
+                              <strong className={`finance-transaction-amount ${transaction.type === "Receita" ? "income" : "expense"}`}>{transaction.type === "Receita" ? "+" : "−"} {formatCurrency(transaction.amount)}</strong>
+                              <span className={`finance-paid-state ${transaction.paid ? "paid" : transaction.dueDate && transaction.dueDate < today ? "late" : "pending"}`}>{transaction.paid ? transaction.type === "Receita" ? "Recebida" : "Paga" : transaction.dueDate && transaction.dueDate < today ? "Vencida" : "Em aberto"}</span>
+                              <div className="finance-transaction-actions">
+                                <button className="icon-button" onClick={() => toggleFinancePaid(transaction)} aria-label={transaction.paid ? "Reabrir lançamento" : "Marcar como pago ou recebido"} title={transaction.paid ? "Reabrir" : "Marcar como pago/recebido"}><Check size={15} /></button>
+                                <button className="icon-button" onClick={() => openFinanceTransaction(transaction)} aria-label={`Editar ${transaction.title}`}><Edit2 size={14} /></button>
+                                <button className="icon-button delete-action" onClick={() => removeFinanceTransaction(transaction)} aria-label={`Excluir ${transaction.title}`}><Trash2 size={14} /></button>
+                              </div>
+                            </article>
+                          ))}</div> : <div className="finance-empty"><Wallet size={23} /><strong>Nenhum lançamento neste mês.</strong><span>Adicione uma receita ou despesa para começar.</span><button className="button button-primary" onClick={() => openFinanceTransaction()}><Plus size={15} />Adicionar lançamento</button></div>}
+                        </section>
+                        <FinanceBudgetPanel month={financeMonth} budgets={monthBudgets} spending={categorySpending} onSave={saveFinanceBudget} />
+                      </div>
+                    </>
+                  )}
+                </section>
+              )}
+
               {activeView === "Notas" && (
                 <section className="notes-workspace">
                   <aside className="notes-list-panel" aria-label="Lista de notas">
@@ -1752,6 +2168,12 @@ export default function App() {
         plan={editingGymPlan}
         onClose={() => { setIsGymFormOpen(false); setEditingGymPlan(null); }}
         onSave={saveGymPlan}
+      />}
+      {isFinanceFormOpen && <FinanceTransactionModal
+        key={editingFinanceTransaction?.id ?? "new-finance-transaction"}
+        transaction={editingFinanceTransaction}
+        onClose={() => { setIsFinanceFormOpen(false); setEditingFinanceTransaction(null); }}
+        onSave={saveFinanceTransaction}
       />}
       {isInstallHelpOpen && <InstallHelpDialog canInstall={installPrompt !== null} onClose={() => setIsInstallHelpOpen(false)} onInstall={installApp} />}
       {toast && <div className="toast" role="status"><CheckCircle2 size={18} />{toast}</div>}
