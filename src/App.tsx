@@ -56,6 +56,7 @@ import { auth, db, firebaseConfigured } from "./firebase";
 
 type Category = "Trabalho" | "Pessoal" | "Saúde" | "Estudo" | "Lazer" | "Outro";
 type Priority = "Alta" | "Média" | "Baixa";
+type TaskRecurrence = "Nenhuma" | "Diariamente" | "Semanalmente" | "Mensalmente" | "Anualmente";
 type View = "Dashboard" | "Dia" | "Semana" | "Inteligente" | "Academia" | "Finanças" | "Notas";
 type NoteBlockType = "paragraph" | "heading" | "bullet" | "checklist" | "quote" | "divider";
 
@@ -89,6 +90,9 @@ interface PlannerTask {
   priority: Priority;
   completed: boolean;
   notes: string;
+  isAllDay?: boolean;
+  recurrence?: TaskRecurrence;
+  completedDates?: string[];
   alarmEnabled?: boolean;
   alarmSound?: boolean;
   alarmVibration?: boolean;
@@ -189,6 +193,40 @@ function shiftDate(date: Date, amount: number) {
   return next;
 }
 
+function taskOccursOn(task: PlannerTask, dateKey: string) {
+  if (task.date === dateKey) return true;
+  const recurrence = task.recurrence ?? "Nenhuma";
+  if (recurrence === "Nenhuma" || dateKey < task.date) return false;
+
+  const [startYear, startMonth, startDay] = task.date.split("-").map(Number);
+  const [year, month, day] = dateKey.split("-").map(Number);
+  if (recurrence === "Diariamente") return true;
+  if (recurrence === "Semanalmente") {
+    const start = Date.UTC(startYear, startMonth - 1, startDay);
+    const current = Date.UTC(year, month - 1, day);
+    return Math.floor((current - start) / 86_400_000) % 7 === 0;
+  }
+  if (recurrence === "Mensalmente") {
+    if (year < startYear || (year === startYear && month < startMonth)) return false;
+    const lastDay = new Date(year, month, 0).getDate();
+    return day === Math.min(startDay, lastDay);
+  }
+  return month === startMonth && day === Math.min(startDay, new Date(year, month, 0).getDate());
+}
+
+function getTasksForDate(tasks: PlannerTask[], dateKey: string) {
+  return tasks
+    .filter((task) => taskOccursOn(task, dateKey))
+    .map((task) => {
+      if ((task.recurrence ?? "Nenhuma") === "Nenhuma") return task;
+      return { ...task, date: dateKey, completed: task.completedDates?.includes(dateKey) ?? false };
+    })
+    .sort((first, second) => {
+      if (first.isAllDay !== second.isAllDay) return first.isAllDay ? -1 : 1;
+      return first.time.localeCompare(second.time);
+    });
+}
+
 function formatDate(date: Date, options: Intl.DateTimeFormatOptions = {}) {
   return new Intl.DateTimeFormat("pt-BR", options).format(date);
 }
@@ -257,6 +295,9 @@ function isPlannerTask(value: unknown): value is PlannerTask {
     && ["Alta", "Média", "Baixa"].includes(String(task.priority))
     && typeof task.completed === "boolean"
     && typeof task.notes === "string"
+    && (task.isAllDay === undefined || typeof task.isAllDay === "boolean")
+    && (task.recurrence === undefined || ["Nenhuma", "Diariamente", "Semanalmente", "Mensalmente", "Anualmente"].includes(String(task.recurrence)))
+    && (task.completedDates === undefined || (Array.isArray(task.completedDates) && task.completedDates.every(isDateKey)))
     && (task.alarmEnabled === undefined || typeof task.alarmEnabled === "boolean")
     && (task.alarmSound === undefined || typeof task.alarmSound === "boolean")
     && (task.alarmVibration === undefined || typeof task.alarmVibration === "boolean");
@@ -709,6 +750,8 @@ function TaskForm({
   const [date, setDate] = useState(task?.date ?? today);
   const [time, setTime] = useState(task?.time ?? "09:00");
   const [duration, setDuration] = useState(String(task?.duration ?? 60));
+  const [isAllDay, setIsAllDay] = useState(task?.isAllDay ?? false);
+  const [recurrence, setRecurrence] = useState<TaskRecurrence>(task?.recurrence ?? "Nenhuma");
   const [category, setCategory] = useState<Category>(task?.category ?? "Trabalho");
   const [priority, setPriority] = useState<Priority>(task?.priority ?? "Média");
   const [notes, setNotes] = useState(task?.notes ?? "");
@@ -730,13 +773,16 @@ function TaskForm({
       id: task?.id ?? createId(),
       title: title.trim(),
       date,
-      time,
+      time: isAllDay ? "" : time,
       duration: Number(duration),
       category,
       priority,
       completed: task?.completed ?? false,
       notes: notes.trim(),
-      alarmEnabled,
+      isAllDay,
+      recurrence,
+      ...(task?.completedDates ? { completedDates: task.completedDates } : {}),
+      alarmEnabled: isAllDay ? false : alarmEnabled,
       alarmSound,
       alarmVibration,
     });
@@ -769,13 +815,13 @@ function TaskForm({
             </label>
             <label className="form-field">
               <span>Horário</span>
-              <input required type="time" value={time} onChange={(event) => setTime(event.target.value)} />
+              <input required={!isAllDay} disabled={isAllDay} type="time" value={time} onChange={(event) => setTime(event.target.value)} />
             </label>
           </div>
           <div className="form-row">
             <label className="form-field">
               <span>Duração (minutos)</span>
-              <input required type="number" min="5" max="1440" step="5" value={duration} onChange={(event) => setDuration(event.target.value)} />
+              <input required type="number" min="5" max="1440" step="5" disabled={isAllDay} value={duration} onChange={(event) => setDuration(event.target.value)} />
             </label>
             <label className="form-field">
               <span>Categoria</span>
@@ -784,6 +830,24 @@ function TaskForm({
               </select>
             </label>
           </div>
+          <label className="task-option-toggle">
+            <input type="checkbox" checked={isAllDay} onChange={(event) => {
+              setIsAllDay(event.target.checked);
+              if (event.target.checked) setAlarmEnabled(false);
+            }} />
+            <span><strong>Dia todo</strong><small>Esta atividade não tem horário específico.</small></span>
+          </label>
+          <label className="form-field">
+            <span>Reincidência</span>
+            <select value={recurrence} onChange={(event) => setRecurrence(event.target.value as TaskRecurrence)}>
+              <option>Nenhuma</option>
+              <option>Diariamente</option>
+              <option>Semanalmente</option>
+              <option>Mensalmente</option>
+              <option>Anualmente</option>
+            </select>
+            {recurrence !== "Nenhuma" && <small>A atividade se repete {recurrence.toLocaleLowerCase("pt-BR")} até você editar ou excluir a reincidência.</small>}
+          </label>
           <fieldset className="priority-field">
             <legend>Prioridade</legend>
             <div className="priority-options">
@@ -794,7 +858,7 @@ function TaskForm({
               ))}
             </div>
           </fieldset>
-          <section className="alarm-settings" aria-labelledby="alarm-settings-title">
+          {!isAllDay && <section className="alarm-settings" aria-labelledby="alarm-settings-title">
             <label className="alarm-toggle">
               <input
                 type="checkbox"
@@ -843,7 +907,7 @@ function TaskForm({
                 <p className="alarm-limit-note">O app precisa estar aberto para verificar o horário. Se ficar suspenso por mais de 2 minutos, o aviso pode não tocar. Notificações dependem das permissões e configurações do aparelho; com o app fechado, não há garantia.</p>
               </div>
             )}
-          </section>
+          </section>}
           <label className="form-field form-field-full">
             <span>Observações <small>opcional</small></span>
             <textarea rows={3} maxLength={300} value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Adicione algum detalhe importante..." />
@@ -871,7 +935,7 @@ function TaskRow({
 }) {
   return (
     <article className={`task-row ${task.completed ? "task-completed" : ""}`}>
-      <time className="task-time">{task.time}</time>
+      <time className={`task-time ${task.isAllDay ? "all-day-time" : ""}`}>{task.isAllDay ? "Dia todo" : task.time}</time>
       <span className={`task-marker ${categoryClass[task.category]}`} aria-hidden="true" />
       <button className={`task-check ${task.completed ? "checked" : ""}`} onClick={onToggle} aria-label={task.completed ? `Reabrir ${task.title}` : `Concluir ${task.title}`}>
         {task.completed && <Check size={13} strokeWidth={3} />}
@@ -884,7 +948,8 @@ function TaskRow({
         {task.notes && <p className="task-notes">{task.notes}</p>}
         <div className="task-meta">
           <span className={`category-label ${categoryClass[task.category]}`}><i />{task.category}</span>
-          <span><Clock3 size={12} />{formatDuration(task.duration)}</span>
+          {!task.isAllDay && <span><Clock3 size={12} />{formatDuration(task.duration)}</span>}
+          {(task.recurrence ?? "Nenhuma") !== "Nenhuma" && <span className="recurring-label">Reincidente · {task.recurrence?.toLocaleLowerCase("pt-BR")}</span>}
           {task.alarmEnabled && <span className="task-alarm-label"><BellRing size={12} />Alarme</span>}
         </div>
       </div>
@@ -1353,8 +1418,9 @@ export default function App() {
 
     function checkAlarms() {
       const now = Date.now();
-      for (const task of tasks) {
-        if (!task.alarmEnabled || task.completed) continue;
+      const currentDate = localDateKey(new Date());
+      for (const task of getTasksForDate(tasks, currentDate)) {
+        if (!task.alarmEnabled || task.completed || task.isAllDay) continue;
         const alarmTime = new Date(`${task.date}T${task.time}:00`).getTime();
         const lateness = now - alarmTime;
         const alarmKey = `${task.id}:${task.date}:${task.time}`;
@@ -1376,14 +1442,16 @@ export default function App() {
   }, [tasks, storageReady, notificationPermission]);
 
   const today = localDateKey(new Date());
-  const todayTasks = useMemo(() => tasks.filter((task) => task.date === today).sort((a, b) => a.time.localeCompare(b.time)), [tasks, today]);
-  const selectedTasks = useMemo(() => tasks.filter((task) => task.date === localDateKey(selectedDate) && (activeCategory === "Todas" || task.category === activeCategory)).sort((a, b) => a.time.localeCompare(b.time)), [tasks, selectedDate, activeCategory]);
+  const todayTasks = useMemo(() => getTasksForDate(tasks, today), [tasks, today]);
+  const selectedTasks = useMemo(() => getTasksForDate(tasks, localDateKey(selectedDate))
+    .filter((task) => activeCategory === "Todas" || task.category === activeCategory), [tasks, selectedDate, activeCategory]);
   const totalToday = todayTasks.length;
   const completedToday = todayTasks.filter((task) => task.completed).length;
-  const completedTotal = tasks.filter((task) => task.completed).length;
-  const overdueCount = tasks.filter((task) => !task.completed && task.date < today).length;
+  const completedTotal = tasks.filter((task) => (task.recurrence ?? "Nenhuma") === "Nenhuma" && task.completed).length
+    + todayTasks.filter((task) => (task.recurrence ?? "Nenhuma") !== "Nenhuma" && task.completed).length;
+  const overdueCount = tasks.filter((task) => (task.recurrence ?? "Nenhuma") === "Nenhuma" && !task.completed && task.date < today).length;
   const highPriorityCount = tasks.filter((task) => !task.completed && task.priority === "Alta").length;
-  const occupiedMinutes = todayTasks.reduce((total, task) => total + task.duration, 0);
+  const occupiedMinutes = todayTasks.reduce((total, task) => total + (task.isAllDay ? 0 : task.duration), 0);
   const progress = tasks.length ? Math.round((completedTotal / tasks.length) * 100) : 0;
 
   const visibleTodayTasks = activeCategory === "Todas" ? todayTasks : todayTasks.filter((task) => task.category === activeCategory);
@@ -1482,7 +1550,9 @@ export default function App() {
   function saveTask(task: PlannerTask) {
     setTasks((current) => {
       const exists = current.some((item) => item.id === task.id);
-      return exists ? current.map((item) => item.id === task.id ? task : item) : [...current, task];
+      return exists ? current.map((item) => item.id === task.id
+        ? { ...task, ...(item.completedDates ? { completedDates: item.completedDates } : {}) }
+        : item) : [...current, task];
     });
     setSelectedDate(new Date(`${task.date}T12:00:00`));
     setIsFormOpen(false);
@@ -1491,13 +1561,29 @@ export default function App() {
   }
 
   function removeTask(task: PlannerTask) {
-    if (!window.confirm(`Excluir "${task.title}"? Esta ação não pode ser desfeita.`)) return;
+    const recurring = (task.recurrence ?? "Nenhuma") !== "Nenhuma";
+    if (!window.confirm(recurring
+      ? `Excluir "${task.title}" e todas as suas reincidências? Esta ação não pode ser desfeita.`
+      : `Excluir "${task.title}"? Esta ação não pode ser desfeita.`)) return;
     setTasks((current) => current.filter((item) => item.id !== task.id));
-    setToast("Atividade excluída.");
+    setToast(recurring ? "Atividade e reincidências excluídas." : "Atividade excluída.");
   }
 
-  function toggleTask(task: PlannerTask) {
-    setTasks((current) => current.map((item) => item.id === task.id ? { ...item, completed: !item.completed } : item));
+  function toggleTask(task: PlannerTask, occurrenceDate = task.date) {
+    if ((task.recurrence ?? "Nenhuma") !== "Nenhuma") {
+      setTasks((current) => current.map((item) => {
+        if (item.id !== task.id) return item;
+        const completedDates = item.completedDates ?? [];
+        return {
+          ...item,
+          completedDates: task.completed
+            ? completedDates.filter((date) => date !== occurrenceDate)
+            : [...new Set([...completedDates, occurrenceDate])],
+        };
+      }));
+    } else {
+      setTasks((current) => current.map((item) => item.id === task.id ? { ...item, completed: !item.completed } : item));
+    }
     setToast(task.completed ? "Atividade reaberta." : "Atividade concluída!");
   }
 
@@ -1938,7 +2024,10 @@ export default function App() {
                       </div>
                       {visibleTodayTasks.length === 0 ? <EmptyState onAdd={openCreate} /> : (
                         <div className="task-list">
-                          {visibleTodayTasks.map((task) => <TaskRow key={task.id} task={task} onToggle={() => toggleTask(task)} onEdit={() => openEdit(task)} onDelete={() => removeTask(task)} />)}
+                          {visibleTodayTasks.map((task) => {
+                            const definition = tasks.find((item) => item.id === task.id) ?? task;
+                            return <TaskRow key={task.id} task={task} onToggle={() => toggleTask(task, today)} onEdit={() => openEdit(definition)} onDelete={() => removeTask(definition)} />;
+                          })}
                         </div>
                       )}
                     </article>
@@ -1965,7 +2054,10 @@ export default function App() {
                     <div><span className="eyebrow">AGENDA DIÁRIA</span><h2>{formatDate(selectedDate, { weekday: "long", day: "numeric", month: "long" })}</h2><p>{selectedTasks.length} {selectedTasks.length === 1 ? "atividade planejada" : "atividades planejadas"}</p></div>
                     <div className="date-controls"><button className="icon-button" onClick={() => setSelectedDate((date) => shiftDate(date, -1))} aria-label="Dia anterior"><ChevronLeft size={19} /></button><button className="button button-quiet today-button" onClick={() => setSelectedDate(new Date())}>Hoje</button><button className="icon-button" onClick={() => setSelectedDate((date) => shiftDate(date, 1))} aria-label="Próximo dia"><ChevronRight size={19} /></button></div>
                   </div>
-                  {selectedTasks.length === 0 ? <EmptyState onAdd={openCreate} /> : <div className="task-list day-task-list">{selectedTasks.map((task) => <TaskRow key={task.id} task={task} onToggle={() => toggleTask(task)} onEdit={() => openEdit(task)} onDelete={() => removeTask(task)} />)}</div>}
+                  {selectedTasks.length === 0 ? <EmptyState onAdd={openCreate} /> : <div className="task-list day-task-list">{selectedTasks.map((task) => {
+                    const definition = tasks.find((item) => item.id === task.id) ?? task;
+                    return <TaskRow key={task.id} task={task} onToggle={() => toggleTask(task, localDateKey(selectedDate))} onEdit={() => openEdit(definition)} onDelete={() => removeTask(definition)} />;
+                  })}</div>}
                 </section>
               )}
 
@@ -1977,10 +2069,10 @@ export default function App() {
                   </div>
                   <div className="week-grid">{weekDays.map((day) => {
                     const dayKey = localDateKey(day);
-                    const dayTasks = tasks.filter((task) => task.date === dayKey && (activeCategory === "Todas" || task.category === activeCategory)).sort((a, b) => a.time.localeCompare(b.time));
+                    const dayTasks = getTasksForDate(tasks, dayKey).filter((task) => activeCategory === "Todas" || task.category === activeCategory);
                     return <button key={dayKey} className={`week-day ${dayKey === today ? "current-day" : ""} ${dayKey === localDateKey(selectedDate) ? "selected-day" : ""}`} onClick={() => { setSelectedDate(day); setActiveView("Dia"); }}>
                       <span className="week-day-name">{formatDate(day, { weekday: "short" })}</span><strong className="week-day-number">{formatDate(day, { day: "2-digit" })}</strong><span className="week-task-count">{dayTasks.length} {dayTasks.length === 1 ? "atividade" : "atividades"}</span>
-                      <div className="week-task-list">{dayTasks.slice(0, 4).map((task) => <span key={task.id} className={`week-task-chip ${categoryClass[task.category]} ${task.completed ? "done-chip" : ""}`}><i />{task.time} {task.title}</span>)}{dayTasks.length > 4 && <span className="more-tasks">+{dayTasks.length - 4} atividades</span>}</div>
+                      <div className="week-task-list">{dayTasks.slice(0, 4).map((task) => <span key={task.id} className={`week-task-chip ${categoryClass[task.category]} ${task.completed ? "done-chip" : ""}`}><i />{task.isAllDay ? "Dia todo" : task.time} {task.title}</span>)}{dayTasks.length > 4 && <span className="more-tasks">+{dayTasks.length - 4} atividades</span>}</div>
                       {dayTasks.length === 0 && <span className="week-empty">Dia livre</span>}
                     </button>;
                   })}</div>

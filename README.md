@@ -11,7 +11,8 @@ Um planner completo e inteligente para organizar seus horários e otimizar sua p
 - **🔐 Conta Google** - Atividades e notas privadas por conta, sincronizadas pelo Firestore
 - **🎨 Categorias** - Trabalho, Pessoal, Saúde, Estudo, Lazer
 - **⚡ Prioridades** - Alta, Média, Baixa
-- **🔄 Recorrência** - Atividades recorrentes
+- **🔄 Recorrência** - Atividades diárias, semanais, mensais ou anuais, com conclusão independente por ocorrência
+- **☀️ Dia todo** - Marque atividades sem horário específico
 - **📲 Instalável** - Use o Plan-ner como aplicativo no computador ou celular
 - **🛜 Interface offline** - A interface pode abrir sem conexão; consultar e sincronizar dados exige internet
 - **🔔 Alarmes por atividade** - Escolha som, vibração e notificações para cada lembrete
@@ -98,6 +99,10 @@ Abra **Finanças** para acompanhar receitas, despesas e saldo previsto por mês.
 Ao criar ou editar uma atividade, ative **Lembrete no horário da atividade** e escolha som, vibração ou ambos. O botão **Testar aviso** permite conferir o som e a vibração no próprio dispositivo. Também é possível permitir notificações do navegador para exibir um aviso na tela.
 
 O Plan-ner verifica os horários enquanto está aberto. Navegadores e sistemas operacionais podem suspender o app em segundo plano ou encerrar seus processos; por isso, alarmes e notificações não são garantidos com o app fechado, e a vibração depende do dispositivo e das permissões do navegador.
+
+### Recorrência e atividades de dia todo
+
+Ao criar ou editar uma atividade, escolha se ela se repete diariamente, semanalmente, mensalmente ou anualmente. A repetição continua até editar ou excluir a atividade; cada ocorrência pode ser concluída separadamente. Editar ou excluir a atividade recorrente altera ou remove toda a série. Atividades marcadas como **Dia todo** aparecem sem horário e não oferecem alarme.
 
 ## 🚀 Deploy no GitHub Pages
 
